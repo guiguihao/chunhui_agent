@@ -8,7 +8,6 @@ import Heartbeat from './services/heartbeat.js';
 import MemoryService from './services/memory.js';
 import MessengerBridge from './services/messenger.js';
 import SkillService from './services/skill.js';
-import WorkflowService from './services/workflow.js';
 import FeishuService from '../plugin/feishu.js';
 import MCPorterService from '../plugin/mcporter.js';
 import WebUIService from '../plugin/webui.js';
@@ -30,7 +29,6 @@ class SmartHomeAgent {
     this.memory = null;
     this.messenger = null; // 消息桥接器
     this.skill = null;     // 技能服务
-    this.workflow = null;  // 工作流服务
     this.feishu = null;
     this.webui = null;
   }
@@ -114,14 +112,7 @@ class SmartHomeAgent {
       this.mcporter = new MCPorterService(this.config.plugins.mcporter, this.agent);
     }
 
-    // 8. 初始化工作流服务
-    this.workflow = new WorkflowService(this.config.workflow || {});
-    await this.workflow.init();
-    this.workflow.setAgent(this.agent);
-    this.workflow.setSkillService(this.skill);
-    this.agent.setWorkflow(this.workflow);
-
-    // 9. 初始化 WebUI 服务
+    // 8. 初始化 WebUI 服务
     if (this.config.plugins?.webui?.enabled) {
       this.webui = new WebUIService(this.config.plugins.webui, this);
     }
@@ -152,20 +143,9 @@ class SmartHomeAgent {
     // 5. 启动 MCPorter 服务
     if (this.mcporter) {
       await this.mcporter.start();
-      // MCPorter 就绪后注入到工作流
-      if (this.workflow) {
-        this.workflow.setMCPService(this.mcporter);
-      }
     }
 
-    // 6. 注入 broadcast 函数到工作流（飞书就绪后）
-    if (this.workflow && this.messenger) {
-      this.workflow.setBroadcast(async (msg) => {
-        await this.messenger.broadcast(msg);
-      });
-    }
-
-    // 7. 启动 WebUI 服务
+    // 6. 启动 WebUI 服务
     if (this.webui) {
       await this.webui.start();
     }
