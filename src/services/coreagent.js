@@ -66,6 +66,8 @@ class CoreAgent {
     this._mcpTools = [];         // MCP 工具列表（OpenAI function-calling 格式）
     this._mcpToolMap = {};       // toolPrefix → { server, toolName, schema }
     this._mcpService = null;     // MCPorterService 实例
+    this._readmeCache = null;    // README.md 内容缓存
+    this._onCronTasksChanged = null; // Cron 任务变更回调
   }
 
   setSkill(skillService) {
@@ -112,6 +114,43 @@ class CoreAgent {
     this._onCronTaskExecute = handler;
   }
 
+  /**
+   * 设置 Cron 任务变动时的回调（用于持久化）
+   * @param {Function} handler
+   */
+  setOnCronTasksChanged(handler) {
+    this._onCronTasksChanged = handler;
+  }
+
+  /**
+   * 热更新模型配置
+   */
+  reloadModelConfig(newModelConfig = {}) {
+    if (newModelConfig.name) this.name = newModelConfig.name;
+    if (newModelConfig.systemPrompt) this.systemPrompt = newModelConfig.systemPrompt;
+    if (newModelConfig.primaryConfigs && newModelConfig.primaryConfigs.length > 0) {
+      this.primaryConfigs = newModelConfig.primaryConfigs;
+      this.currentPrimaryIndex = 0;
+      const initPrimary = this.primaryConfigs[0] || {};
+      this.model = initPrimary.model;
+      this.thinking = initPrimary.thinking || false;
+      this.stream = initPrimary.stream || false;
+      this.client = new OpenAI({
+        baseURL: initPrimary.baseUrl,
+        apiKey: initPrimary.apiKey,
+        timeout: 60000,
+        defaultHeaders: {
+          'User-Agent': 'curl/8.7.1',
+        },
+      });
+      console.log(`[CoreAgent] Model config reloaded: primary=${this.model}`);
+    }
+    if (newModelConfig.fallbackConfigs) {
+      this.fallbackConfigs = newModelConfig.fallbackConfigs;
+    }
+    this._readmeCache = null; // 刷新 README 缓存
+  }
+
   async init() {
     await fs.mkdir(this.sessionDir, { recursive: true });
   }
@@ -134,18 +173,20 @@ class CoreAgent {
   }
 
   async _buildSystemPrompt() {
-    let readmeContent = '';
-    try {
-      const readmePath = path.resolve(process.cwd(), 'README.md');
-      readmeContent = await fs.readFile(readmePath, 'utf8');
-    } catch (e) {
-      console.warn('[CoreAgent] Failed to load README.md for system prompt');
+    if (this._readmeCache === null) {
+      try {
+        const readmePath = path.resolve(process.cwd(), 'README.md');
+        this._readmeCache = await fs.readFile(readmePath, 'utf8');
+      } catch (e) {
+        console.warn('[CoreAgent] Failed to load README.md for system prompt');
+        this._readmeCache = '';
+      }
     }
 
     return this.systemPrompt
       .replace('{name}', this.name)
       .replace(/{workspace}/g, this._workspace || process.cwd())
-      .replace('{readme.md}', readmeContent)
+      .replace('{readme.md}', this._readmeCache)
       .replace('{time}', new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }));
   }
 
@@ -330,6 +371,118 @@ class CoreAgent {
         }
       );
     }
+
+    // 文件操作工具（沙箱化：限制在工作目录）
+    tools.push(
+      {
+        type: 'function',
+        function: {
+          name: 'file_read',
+          description: '读取文件内容（仅限工作目录，禁止读取敏感配置文件）',
+          parameters: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', description: '文件相对路径或工作区内绝对路径' },
+            },
+            required: ['path'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'file_write',
+          description: '向工作区写入文件内容（覆盖写入，仅限工作目录）',
+          parameters: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', description: '目标文件相对路径' },
+              content: { type: 'string', description: '要写入的文件内容' },
+            },
+            required: ['path', 'content'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'file_append',
+          description: '向工作区文件追加内容（仅限工作目录）',
+          parameters: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', description: '目标文件相对路径' },
+              content: { type: 'string', description: '要追加的文件内容' },
+            },
+            required: ['path', 'content'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'file_exists',
+          description: '检查指定文件或目录是否存在',
+          parameters: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', description: '文件路径' },
+            },
+            required: ['path'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'file_list',
+          description: '列出工作区指定目录下的文件列表',
+          parameters: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', description: '目录路径，默认工作目录根路径' },
+            },
+            required: [],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'file_delete',
+          description: '删除工作区内的文件（仅限工作目录）',
+          parameters: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', description: '要删除的文件相对路径' },
+            },
+            required: ['path'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'file_edit',
+          description: '编辑工作区文件内容（支持插入行、删除行、替换行、文本替换等，仅限工作目录）',
+          parameters: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', description: '目标文件路径' },
+              find: { type: 'string', description: '要查找的文本或正则' },
+              replace: { type: 'string', description: '替换后的新文本' },
+              insert_line: { type: 'number', description: '在此行号前插入内容' },
+              content: { type: 'string', description: '插入或替换的文本内容' },
+              replace_line: { type: 'number', description: '替换指定行号内容' },
+              delete_line: { type: 'number', description: '删除指定行号' },
+              all: { type: 'boolean', description: '是否替换所有匹配项' },
+              regex: { type: 'boolean', description: '是否将 find 作为正则表达式' },
+            },
+            required: ['path'],
+          },
+        },
+      }
+    );
 
     // 技能工具
     if (this._skillService) {
@@ -615,7 +768,7 @@ class CoreAgent {
   }
 
   /**
-   * 处理文件工具调用
+   * 处理文件工具调用（沙箱化：强制限定在 workspace 目录内）
    */
   async _handleFileTool(toolName, args = {}) {
     // 动态导入 fs 模块（ESM 环境）
@@ -623,37 +776,67 @@ class CoreAgent {
     const path = await import('path');
 
     try {
+      const workspaceDir = path.resolve(process.cwd(), this._workspace || './workspace');
+      const rawPath = args.path || '.';
+      // 如果传入相对路径，优先基于 workspace 目录解析
+      const resolvedPath = path.isAbsolute(rawPath)
+        ? path.resolve(rawPath)
+        : path.resolve(workspaceDir, rawPath);
+
+      const baseName = path.basename(resolvedPath).toLowerCase();
+
+      // 1. 拦截敏感文件读取
+      const isSensitive = baseName.startsWith('.env') ||
+        baseName.endsWith('.key') ||
+        baseName.endsWith('.pem') ||
+        baseName.endsWith('.db') ||
+        resolvedPath.includes('/.git/');
+
+      if (isSensitive) {
+        return '操作拒绝: 禁止访问系统核心配置文件或密钥凭据。';
+      }
+
+      // 2. 写操作安全沙箱（严禁写出 workspace 目录，保护核心源码和配置）
+      const writeOps = ['file_write', 'file_append', 'file_delete', 'file_edit'];
+      if (writeOps.includes(toolName)) {
+        if (!resolvedPath.startsWith(workspaceDir)) {
+          return `操作拒绝: 为保障安全，所有文件新建/修改/删除仅允许在工作目录 (${this._workspace || './workspace'}) 内进行。`;
+        }
+      }
+
       switch (toolName) {
         case 'file_read':
-          const content = await fs.readFile(args.path, 'utf8');
+          const content = await fs.readFile(resolvedPath, 'utf8');
           return content;
 
         case 'file_write':
-          await fs.writeFile(args.path, args.content, 'utf8');
-          return `已写入文件: ${args.path}`;
+          await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
+          await fs.writeFile(resolvedPath, args.content || '', 'utf8');
+          return `已写入文件: ${path.relative(workspaceDir, resolvedPath)}`;
 
         case 'file_append':
-          await fs.appendFile(args.path, args.content, 'utf8');
-          return `已追加到文件: ${args.path}`;
+          await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
+          await fs.appendFile(resolvedPath, args.content || '', 'utf8');
+          return `已追加到文件: ${path.relative(workspaceDir, resolvedPath)}`;
 
         case 'file_exists':
           try {
-            await fs.access(args.path);
+            await fs.access(resolvedPath);
             return 'true';
           } catch {
             return 'false';
           }
 
         case 'file_delete':
-          await fs.unlink(args.path);
-          return `已删除文件: ${args.path}`;
+          await fs.unlink(resolvedPath);
+          return `已删除文件: ${path.relative(workspaceDir, resolvedPath)}`;
 
         case 'file_list':
-          const files = await fs.readdir(args.path || '.');
+          const files = await fs.readdir(resolvedPath);
           return files.join('\n');
 
         case 'file_edit':
-          return await this._editFile(fs, args.path, args);
+          return await this._editFile(fs, resolvedPath, args);
 
         default:
           return `未知文件工具: ${toolName}`;
@@ -835,23 +1018,34 @@ class CoreAgent {
           } else {
             console.warn(`[CoreAgent] Cron task ${args.task_id} fired but no executor set`);
           }
-        }, { name: args.name });
+        }, { name: args.name, prompt: args.description });
+        if (this._onCronTasksChanged) {
+          this._onCronTasksChanged();
+        }
         return `已添加定时任务: ${args.task_id}`;
 
       case 'mgmt_cron_remove':
         if (!this._scheduler) return '调度器未配置';
         this._scheduler.unregister(args.task_id);
+        if (this._onCronTasksChanged) {
+          this._onCronTasksChanged();
+        }
         return `已删除定时任务: ${args.task_id}`;
 
       case 'mgmt_cron_toggle':
         if (!this._scheduler) return '调度器未配置';
+        let toggleResult = '';
         if (args.enabled) {
           const ok = this._scheduler.enable(args.task_id);
-          return ok ? `已启用任务: ${args.task_id}` : `任务 ${args.task_id} 不存在，无法启用`;
+          toggleResult = ok ? `已启用任务: ${args.task_id}` : `任务 ${args.task_id} 不存在，无法启用`;
         } else {
           const ok = this._scheduler.disable(args.task_id);
-          return ok ? `已禁用任务: ${args.task_id}` : `任务 ${args.task_id} 不存在，无法禁用`;
+          toggleResult = ok ? `已禁用任务: ${args.task_id}` : `任务 ${args.task_id} 不存在，无法禁用`;
         }
+        if (this._onCronTasksChanged) {
+          this._onCronTasksChanged();
+        }
+        return toggleResult;
 
       case 'mgmt_heartbeat_get':
         if (!this._heartbeat) return '心跳未配置';

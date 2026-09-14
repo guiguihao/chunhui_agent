@@ -19,7 +19,7 @@ dotenv.config();
 
 /**
  * ureal Agent 主入口
- * 基于 Qwen Code 无头模式驱动的智能家居 AI Agent
+ * 智能家居 AI Agent
  */
 class SmartHomeAgent {
   constructor() {
@@ -81,8 +81,15 @@ class SmartHomeAgent {
       console.log(`[Agent] Cron triggered: ${taskConfig.name}`);
       const res = await this.thinkAndAct(prompt);
       console.log(`Cron triggered: ${taskConfig.name}, result: ${JSON.stringify(res)}`);
+      const reply = res?.reply || res?.response;
+      if (reply && reply.trim() && this.messenger) {
+        await this.messenger.broadcast(`⏰ **定时任务执行: ${taskConfig.name}**\n\n${reply}`);
+      }
+    });
 
-
+    // 设置 Cron 任务变动持久化回调
+    this.agent.setOnCronTasksChanged(async () => {
+      await this.saveCronTasks();
     });
 
     // 6. 初始化消息桥接器
@@ -108,12 +115,11 @@ class SmartHomeAgent {
     }
 
     // 8. 初始化工作流服务
-    // this.workflow = new WorkflowService(this.config.workflow || {});
-    // await this.workflow.init();
-    // this.workflow.setAgent(this.agent);
-    // this.workflow.setSkillService(this.skill);
-    // // MCPorter 在 start() 阶段才完全就绪，broadcast 也在 start() 后注入
-    // this.agent.setWorkflow(this.workflow);
+    this.workflow = new WorkflowService(this.config.workflow || {});
+    await this.workflow.init();
+    this.workflow.setAgent(this.agent);
+    this.workflow.setSkillService(this.skill);
+    this.agent.setWorkflow(this.workflow);
 
     // 9. 初始化 WebUI 服务
     if (this.config.plugins?.webui?.enabled) {
@@ -219,6 +225,12 @@ class SmartHomeAgent {
       };
 
       console.log('[Agent] Config loaded (merged)');
+
+      // 如果 Agent 已经初始化，热更新运行时模型配置
+      if (this.agent && typeof this.agent.reloadModelConfig === 'function') {
+        const modelConfig = this._buildModelConfig();
+        this.agent.reloadModelConfig(modelConfig);
+      }
     } catch (error) {
       console.error('[Agent] Config load error:', error.message);
       throw error;
@@ -389,6 +401,32 @@ class SmartHomeAgent {
     } catch (error) {
       console.error('[Agent] ThinkAndAct error:', error.message);
       throw error;
+    }
+  }
+
+  /**
+   * 将当前所有定时任务持久化保存到 config/cron.yaml
+   */
+  async saveCronTasks() {
+    if (!this.scheduler) return;
+    try {
+      const tasks = this.scheduler.listTasks();
+      const cronPath = path.join(process.cwd(), 'config', 'cron.yaml');
+      const yamlContent = yaml.stringify({
+        cron: {
+          tasks: tasks.map(t => ({
+            id: t.id,
+            name: t.name,
+            cron: t.cron,
+            enabled: t.enabled !== false,
+            prompt: t.prompt || '',
+          })),
+        },
+      });
+      await fs.writeFile(cronPath, yamlContent, 'utf8');
+      console.log(`[Agent] 💾 Saved ${tasks.length} cron task(s) to config/cron.yaml`);
+    } catch (e) {
+      console.error('[Agent] Failed to save cron.yaml:', e.message);
     }
   }
 

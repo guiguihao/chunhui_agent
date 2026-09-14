@@ -61,6 +61,7 @@ class Scheduler {
         },
         {
           name: taskConfig.name,
+          prompt: taskConfig.prompt,
           autoStart: true,
         }
       );
@@ -143,9 +144,11 @@ class Scheduler {
   listTasks() {
     return Array.from(this.tasks.entries()).map(([id, data]) => ({
       id,
-      name: data.options.name,
+      name: data.options.name || id,
       cron: data.cronExpression,
+      enabled: Boolean(data.running),
       running: data.running,
+      prompt: data.options.prompt || '',
     }));
   }
 }

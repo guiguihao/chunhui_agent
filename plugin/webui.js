@@ -33,9 +33,19 @@ class WebUIService {
         const workspaceDir = path.resolve(process.cwd(), 'workspace');
         const miotMcpDir = path.resolve(homeDir, '.miot-mcp');
 
-        const isAllowed = resolvedPath.startsWith(workspaceDir) || 
-                          resolvedPath.startsWith(miotMcpDir) ||
-                          resolvedPath.startsWith(path.resolve(process.cwd()));
+        const baseName = path.basename(resolvedPath).toLowerCase();
+        // 显式禁止访问任何敏感配置文件或凭据
+        const isSensitive = baseName.startsWith('.env') || 
+                            baseName.endsWith('.key') || 
+                            baseName.endsWith('.pem') || 
+                            baseName.endsWith('.db') || 
+                            resolvedPath.includes('/.git/') ||
+                            resolvedPath.includes('/config/');
+
+        const isAllowed = !isSensitive && (
+          resolvedPath.startsWith(workspaceDir) || 
+          resolvedPath.startsWith(miotMcpDir)
+        );
 
         if (!isAllowed) {
           console.warn(`[WebUI] Blocked unauthorized file access attempt: ${resolvedPath}`);
