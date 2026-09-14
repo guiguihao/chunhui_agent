@@ -1,0 +1,111 @@
+/* MCPView-specific styles */
+
+/* ── Login button ── */
+.btn-login-qr {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.2s ease;
+  background: linear-gradient(135deg, #f59e0b 0%, #ef4444 100%);
+  border: none;
+  color: white;
+  box-shadow: 0 3px 10px rgba(245, 158, 11, 0.3);
+}
+
+.btn-login-qr:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 5px 14px rgba(245, 158, 11, 0.45);
+}
+
+/* ── QR Overlay ── */
+.qr-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: fadeIn 0.2s ease;
+}
+
+/* ── QR Modal ── */
+.qr-modal {
+  background: rgba(15, 20, 35, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  width: 360px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  animation: slideUp 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(30px) scale(0.95); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.qr-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.qr-header h3 {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0;
+  background: linear-gradient(135deg, #f59e0b 0%, #ef4444 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.qr-body {
+  padding: 28px 24px 32px;
+}
+
+.qr-body.center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.qr-body.center p {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-main);
+  text-align: center;
+}
+
+.qr-hint {
+  color: var(--text-muted) !important;
+  font-size: 12px !important;
+}
+
+.qr-image {
+  width: 240px;
+  height: 240px;
+  border-radius: 12px;
+  border: 3px solid rgba(255, 255, 255, 0.1);
+  background: white;
+  padding: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.qr-gen-time {
+  font-size: 11px !important;
+  color: var(--accent-primary) !important;
+  opacity: 0.8;
+  margin-top: 4px !important;
+}

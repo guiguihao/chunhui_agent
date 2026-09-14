@@ -1,0 +1,74 @@
+workflows:
+  - id: office_morning_setup
+    name: 8点办公室空调灯光开启
+    steps:
+      - id: step1
+        type: skill
+        skill: mcp_ha-mcp_call_service
+        params:
+          domain: switch
+          service: turn_on
+          entity_id: switch.hai_er_kong_diao_kai_guan_ji
+      - id: step2
+        type: skill
+        skill: mcp_ha-mcp_call_service
+        params:
+          domain: switch
+          service: turn_on
+          entity_id: switch.hai_er_kong_diao_kai_guan_ji_3
+      - id: step3
+        type: skill
+        skill: mcp_ha-mcp_call_service
+        params:
+          domain: switch
+          service: turn_on
+          entity_id: switch.hai_er_kong_diao_kai_guan_ji_4
+      - id: step4
+        type: skill
+        skill: mcp_ha-mcp_call_service
+        params:
+          domain: switch
+          service: turn_on
+          entity_id: switch.hai_er_kong_diao_kai_guan_ji_6
+      - id: step5
+        type: skill
+        skill: mcp_ha-mcp_call_service
+        params:
+          domain: switch
+          service: turn_on
+          entity_id: switch.hai_er_kong_diao_kai_guan_ji_7
+      - id: step6
+        type: skill
+        skill: mcp_ha-mcp_call_service
+        params:
+          domain: switch
+          service: turn_on
+          entity_id: switch.ckcper_cn_2144280885_bln003_on_p_2_1
+      - id: step7
+        type: skill
+        skill: mcp_ha-mcp_call_service
+        params:
+          domain: switch
+          service: turn_on
+          entity_id: switch.ckcper_cn_2144280885_bln003_on_p_3_1
+      - id: step8
+        type: skill
+        skill: mcp_ha-mcp_call_service
+        params:
+          domain: switch
+          service: turn_on
+          entity_id: switch.ckcper_cn_2144280885_bln003_on_p_4_1
+      - id: step9
+        type: skill
+        skill: mcp_ha-mcp_call_service
+        params:
+          domain: switch
+          service: turn_on
+          entity_id: switch.ckcper_cn_2144306477_bln002_on_p_2_1
+      - id: step10
+        type: skill
+        skill: mcp_ha-mcp_call_service
+        params:
+          domain: switch
+          service: turn_on
+          entity_id: switch.ckcper_cn_2144306477_bln002_on_p_3_1

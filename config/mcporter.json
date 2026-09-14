@@ -1,0 +1,35 @@
+{
+  "mcpServers": {
+    "ha-mcp": {
+      "enabled": true,
+      "serverUrl": "http://127.0.0.1:8123/api/mcp",
+      "headers": {
+        "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiIwOTUyMDkwMzZmODA0OWIxYmM3YWEwZWZiYzAzZGQ3YyIsImlhdCI6MTc4MDI4MDA3NSwiZXhwIjoyMDk1NjQwMDc1fQ.4oEA_N1wDx8gRhVFyCy1yMXgP6egtKimBz-z5DZ1GGA"
+      }
+    },
+    "ureal-mcp": {
+      "enabled": false,
+      "command": "python3",
+      "args": [
+        "../mcp/ureal-mcp/server.py"
+      ]
+    },
+    "miot-mcp": {
+      "enabled": false,
+      "command": "python3",
+      "args": [
+        "../mcp/miot-mcp/mcp_server/mcp_server.py"
+      ],
+      "env": {
+        "MIJIA_LOG_LEVEL": "INFO"
+      }
+    },
+    "xiaodu-mcp": {
+      "enabled": false,
+      "url": "https://xiaodu.baidu.com/dueros_mcp_server/mcp/",
+      "headers": {
+        "ACCESS_TOKEN": "${XIAODU_ACCESS_TOKEN}"
+      }
+    }
+  }
+}

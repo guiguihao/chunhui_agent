@@ -1,0 +1,42 @@
+cron:
+  tasks:
+    - id: morning_routine
+      name: 早晨模式
+      cron: 0 7 * * *
+      enabled: false
+      prompt: 现在是早上7点，用户起床了，杭州天气怎么样？建议, 根据天气情况和室内情况，给用户穿衣建议和行程建议
+    - id: morning_news
+      name: 新闻早报
+      cron: 0 8 * * *
+      enabled: false
+      prompt: 今天早上的新闻，20条，内容涵盖科技、财经和民生等领域 (不要表格)
+    - id: stock_news
+      name: 股市早报
+      cron: 0 9 * * *
+      enabled: false
+      prompt: 股市早报，20条内容， 并附带投资建议 (不要表格)
+    - id: stock_noon_news
+      name: 股市午报
+      cron: 0 12 * * *
+      enabled: false
+      prompt: 股市午报，20条内容， 并附带投资建议 (不要表格)
+    - id: night_news
+      name: 夜间新闻
+      cron: 15 9 * * *
+      enabled: false
+      prompt: 夜间新闻，20条内容，内容涵盖科技、财经和民生等领域 (不要表格)
+    - id: task_1779441378781
+      name: 午睡 中午12：30 关灯
+      cron: 30 12 * * 1-5
+      enabled: true
+      prompt: 午睡 关闭所有灯光
+    - id: task_1779441495277
+      name: 午睡起床开灯
+      cron: 30 13 * * 1-5
+      enabled: true
+      prompt: "打开所有灯光 "
+    - id: task_1779442273761
+      name: 下班关灯
+      cron: 35 17 * * *
+      enabled: false
+      prompt: 下班了，关闭所有灯光（周一到周五）

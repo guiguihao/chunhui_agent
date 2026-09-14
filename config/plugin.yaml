@@ -1,0 +1,22 @@
+# 插件配置
+
+plugins:
+  # 飞书插件
+  feishu:
+    enabled: true
+    app_id: "${FEISHU_APP_ID}"
+    app_secret: "${FEISHU_APP_SECRET}"
+    enable_listener: true
+    auto_reply: true
+    # notification_chat_id: "oc_8a046ca7cb2879b737045340f86216f4" # 确保此行不带注释且 ID 正确
+
+  # MCPorter 插件 — MCP Server 客户端
+  mcporter:
+    enabled: true
+    config_path: "./config/mcporter.json"
+    timeout: 30000
+
+  # WebUI 控制台插件
+  webui:
+    enabled: true
+    port: 8080
