@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo, memo } from 'react'
 import { Send, User, Bot, Plus, Cpu, ChevronDown, ChevronUp, CheckCircle2, Loader2 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -62,6 +62,10 @@ function MessageItem({ msg }) {
   const [expandedTools, setExpandedTools] = useState({});
   const [lightboxSrc, setLightboxSrc] = useState(null);
   const { t } = useLanguage();
+
+  // 图片正则扫描成本不低，且流式过程中每条 chunk 都会触发渲染；
+  // 只有该消息文本变化时才需要重新提取
+  const detectedImages = useMemo(() => extractImages(msg.content), [msg.content]);
 
   const toggleTool = (toolId) => {
     setExpandedTools(prev => ({
@@ -196,32 +200,28 @@ function MessageItem({ msg }) {
         )}
 
         {/* 4. 如果内容中包含图片地址，直接在下方显示图片 */}
-        {msg.content && (() => {
-          const detectedImages = extractImages(msg.content);
-          if (detectedImages.length === 0) return null;
-          return (
-            <div className="message-images-gallery">
-              {detectedImages.map((img, idx) => (
-                <div 
-                  key={idx} 
-                  className="message-image-card glass-panel"
-                  onClick={() => setLightboxSrc(img.webUrl)}
-                  title={t('lightbox_hover')}
-                >
-                  <img 
-                    src={img.webUrl} 
-                    alt={`${t('lightbox_title')} ${idx + 1}`} 
-                    className="message-inline-image"
-                    onError={(e) => {
-                      e.target.parentElement.style.display = 'none';
-                    }}
-                  />
-                  <div className="image-caption">{img.original.split('/').pop()}</div>
-                </div>
-              ))}
-            </div>
-          );
-        })()}
+        {detectedImages.length > 0 && (
+          <div className="message-images-gallery">
+            {detectedImages.map((img, idx) => (
+              <div
+                key={img.webUrl}
+                className="message-image-card glass-panel"
+                onClick={() => setLightboxSrc(img.webUrl)}
+                title={t('lightbox_hover')}
+              >
+                <img
+                  src={img.webUrl}
+                  alt={`${t('lightbox_title')} ${idx + 1}`}
+                  className="message-inline-image"
+                  onError={(e) => {
+                    e.target.parentElement.style.display = 'none';
+                  }}
+                />
+                <div className="image-caption">{img.original.split('/').pop()}</div>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Lightbox 弹出大图 */}
         {lightboxSrc && (
@@ -235,6 +235,10 @@ function MessageItem({ msg }) {
     </div>
   );
 }
+
+// 流式输出时父组件每个 chunk 都会重渲染；非目标消息对象引用不变，
+// memo 化后可以跳过多余的 Markdown 解析与图片提取
+const MemoMessageItem = memo(MessageItem);
 
 // ───────── 主组件 ─────────
 export default function SessionView() {
@@ -302,6 +306,14 @@ export default function SessionView() {
 
       if (!response.body) {
         throw new Error(t('stream_error'));
+      }
+
+      // 后端异常时可能返回 JSON/HTML 而非 SSE；不校验的话循环里所有行都不以
+      // "data: " 开头被静默跳过，用户只看到一个空白气泡，完全没有错误提示
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('text/event-stream')) {
+        const raw = await response.text();
+        throw new Error(raw.slice(0, 300) || t('stream_error'));
       }
 
       const reader = response.body.getReader();
@@ -437,7 +449,7 @@ export default function SessionView() {
       <div className="chat-container glass-panel">
         <div className="messages-list">
           {messages.map(msg => (
-            <MessageItem key={msg.id} msg={msg} />
+            <MemoMessageItem key={msg.id} msg={msg} />
           ))}
           {isTyping && (
             <div className="message-wrapper assistant">
@@ -459,7 +471,12 @@ export default function SessionView() {
             placeholder={t('chat_placeholder')}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyPress={(e) => e.key === 'Enter' && handleSend()}
+            onKeyDown={(e) => {
+              // 中文输入法组词时按 Enter 是「确认候选词」，不应触发发送
+              if (e.key !== 'Enter' || e.nativeEvent.isComposing) return
+              e.preventDefault()
+              handleSend()
+            }}
             disabled={isTyping}
           />
           <button className="btn-send" onClick={handleSend} disabled={isTyping}>

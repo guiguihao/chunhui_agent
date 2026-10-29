@@ -52,6 +52,7 @@ const translations = {
     cron_id_placeholder: 'unique_id',
     cron_name_placeholder: 'e.g. Morning Report',
     cron_expr_placeholder: '0 9 * * *',
+    cron_invalid: 'invalid cron expression (5 fields: minute hour day month weekday)',
     save_ok: '✓ Saved',
     save_ok_restart: '✓ Saved · restart required: {modules}',
     save_err: 'Error: ',
@@ -200,6 +201,7 @@ const translations = {
     cron_id_placeholder: '唯一标识符',
     cron_name_placeholder: '例如：早报',
     cron_expr_placeholder: '0 9 * * *',
+    cron_invalid: '定时表达式不合法（需 5 段：分 时 日 月 周）',
     save_ok: '✓ 保存成功',
     save_ok_restart: '✓ 已保存 · 需重启生效：{modules}',
     save_err: '错误: ',
@@ -303,7 +305,9 @@ const translations = {
 
 export function LanguageProvider({ children }) {
   const [language, setLanguage] = useState(() => {
-    return localStorage.getItem('webui_lang') || 'zh' // Default to Chinese
+    // 从源头拒绝非法值：localStorage 里的内容可能来自旧版本或被手工改写
+    const saved = localStorage.getItem('webui_lang')
+    return translations[saved] ? saved : 'zh' // Default to Chinese
   })
 
   useEffect(() => {
@@ -315,9 +319,11 @@ export function LanguageProvider({ children }) {
   }
 
   const t = (key, variables = {}) => {
-    let text = translations[language][key] || translations['en'][key] || key
+    // localStorage 可能残留旧版本或手工改写的非法值，缺兜底会直接白屏
+    const dict = translations[language] || translations.zh
+    let text = dict[key] ?? translations.zh[key] ?? translations.en[key] ?? key
     Object.entries(variables).forEach(([k, v]) => {
-      text = text.replaceAll(`{${k}}`, v)
+      text = String(text).replaceAll(`{${k}}`, String(v))
     })
     return text
   }

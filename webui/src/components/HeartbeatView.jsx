@@ -1,7 +1,13 @@
 import { useState, useEffect } from 'react'
 import { Save, RefreshCw, Plus, Trash2, Heart } from 'lucide-react'
 import { useLanguage } from './LanguageContext'
+import { isValidCron } from '../lib/cron'
 import './PanelView.css'
+
+// 检查项用本地稳定 _key 做 React key（name 可编辑且允许重复），提交前剥离
+let uid = 0
+const nextKey = () => `k${++uid}`
+const withKeys = (checks = []) => (checks || []).map(c => ({ ...c, _key: nextKey() }))
 
 export default function HeartbeatView() {
   const { t } = useLanguage()
@@ -11,24 +17,34 @@ export default function HeartbeatView() {
   const [saveMsg, setSaveMsg] = useState('')
 
   useEffect(() => {
-    fetch('/api/heartbeat').then(r => r.json()).then(d => { setHb(d); setLoading(false) })
+    fetch('/api/heartbeat').then(r => r.json()).then(d => {
+      setHb({ ...d, checks: withKeys(d.checks) })
+      setLoading(false)
+    })
   }, [])
 
   const save = async () => {
+    // interval 同样是 cron 表达式，且与 cron.yaml 一样是「先落盘再重建调度器」，
+    // 非法值会让任务停摆并影响下次启动，必须在提交前拦掉
+    if (!isValidCron(hb.interval)) {
+      setSaveMsg(`${t('save_err')}${t('hb_interval')} — ${t('cron_invalid')}`)
+      return
+    }
     setSaving(true); setSaveMsg('')
     try {
-      const r = await fetch('/api/heartbeat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(hb) })
+      const payload = { ...hb, checks: (hb.checks || []).map(({ _key, ...chk }) => chk) }
+      const r = await fetch('/api/heartbeat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
       const d = await r.json()
       setSaveMsg(d.success ? t('save_ok') : `${t('save_err')}${d.error}`)
     } catch(e) { setSaveMsg(`${t('save_err')}${e.message}`) }
     finally { setSaving(false); setTimeout(() => setSaveMsg(''), 3000) }
   }
 
-  const updateCheck = (idx, field, val) =>
-    setHb(prev => ({ ...prev, checks: prev.checks.map((c, i) => i === idx ? { ...c, [field]: val } : c) }))
+  const updateCheck = (key, field, val) =>
+    setHb(prev => ({ ...prev, checks: (prev.checks || []).map(c => c._key === key ? { ...c, [field]: val } : c) }))
 
-  const addCheck = () => setHb(prev => ({ ...prev, checks: [...(prev.checks || []), { name: '', prompt: '' }] }))
-  const removeCheck = (idx) => setHb(prev => ({ ...prev, checks: prev.checks.filter((_, i) => i !== idx) }))
+  const addCheck = () => setHb(prev => ({ ...prev, checks: [...(prev.checks || []), { _key: nextKey(), name: '', prompt: '' }] }))
+  const removeCheck = (key) => setHb(prev => ({ ...prev, checks: (prev.checks || []).filter(c => c._key !== key) }))
 
   if (loading) return <div className="panel-loading"><RefreshCw size={20} className="spin" /> {t('btn_saving')}</div>
 
@@ -81,18 +97,18 @@ export default function HeartbeatView() {
             <button className="btn-text" onClick={addCheck}><Plus size={14} /> {t('btn_add_check')}</button>
           </div>
           {(hb.checks || []).length === 0 && <div className="panel-empty">{t('hb_empty')}</div>}
-          {(hb.checks || []).map((chk, idx) => (
-            <div key={idx} className="check-item">
+          {(hb.checks || []).map(chk => (
+            <div key={chk._key} className="check-item">
               <div className="form-row" style={{ marginBottom: 0 }}>
                 <div className="form-group flex-1">
                   <label className="form-label">{t('hb_name')}</label>
-                  <input className="form-input" value={chk.name} onChange={e => updateCheck(idx,'name',e.target.value)} placeholder={t('hb_name_placeholder')} />
+                  <input className="form-input" value={chk.name} onChange={e => updateCheck(chk._key,'name',e.target.value)} placeholder={t('hb_name_placeholder')} />
                 </div>
-                <button className="icon-btn danger" style={{ marginTop: 24 }} onClick={() => removeCheck(idx)}><Trash2 size={15}/></button>
+                <button className="icon-btn danger" style={{ marginTop: 24 }} onClick={() => removeCheck(chk._key)}><Trash2 size={15}/></button>
               </div>
               <div className="form-group">
                 <label className="form-label">{t('hb_prompt')}</label>
-                <textarea className="form-input form-textarea" rows={3} value={chk.prompt} onChange={e => updateCheck(idx,'prompt',e.target.value)} placeholder={t('hb_prompt_placeholder')} />
+                <textarea className="form-input form-textarea" rows={3} value={chk.prompt} onChange={e => updateCheck(chk._key,'prompt',e.target.value)} placeholder={t('hb_prompt_placeholder')} />
               </div>
             </div>
           ))}

@@ -59,6 +59,11 @@ function QRModal({ onClose }) {
   )
 }
 
+// 列表渲染与展开状态用本地稳定 _key（server.name 用户可编辑且可能重复），
+// 提交前会被剥离，不写入配置文件
+let uid = 0
+const nextKey = () => `k${++uid}`
+
 // ── Main View ──────────────────────────────────────
 export default function MCPView() {
   const { t } = useLanguage()
@@ -70,30 +75,38 @@ export default function MCPView() {
   const [showQR, setShowQR] = useState(false)
 
   useEffect(() => {
-    fetch('/api/mcp').then(r => r.json()).then(d => { setServers(d.servers || []); setLoading(false) })
+    fetch('/api/mcp').then(r => r.json()).then(d => {
+      setServers((d.servers || []).map(srv => ({ ...srv, _key: nextKey() })))
+      setLoading(false)
+    })
   }, [])
 
   const save = async () => {
     setSaving(true); setSaveMsg('')
     try {
-      const r = await fetch('/api/mcp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ servers }) })
+      const payload = servers.map(({ _key, ...srv }) => srv)
+      const r = await fetch('/api/mcp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ servers: payload }) })
       const d = await r.json()
       setSaveMsg(d.success ? t('save_ok') : `${t('save_err')}${d.error}`)
     } catch(e) { setSaveMsg(`${t('save_err')}${e.message}`) }
     finally { setSaving(false); setTimeout(() => setSaveMsg(''), 3000) }
   }
 
-  const update = (idx, field, val) => setServers(prev => prev.map((s, i) => i === idx ? { ...s, [field]: val } : s))
-  const updateArgs = (idx, val) => update(idx, 'args', val.split('\n').filter(Boolean))
-  const updateEnvEntry = (idx, key, val) => {
-    const env = { ...(servers[idx].env || {}), [key]: val }
-    update(idx, 'env', env)
+  const update = (key, field, val) => setServers(prev => prev.map(s => s._key === key ? { ...s, [field]: val } : s))
+  const updateArgs = (key, val) => update(key, 'args', val.split('\n').filter(Boolean))
+  const updateEnvEntry = (key, envKey, val) => {
+    const target = servers.find(s => s._key === key)
+    update(key, 'env', { ...(target?.env || {}), [envKey]: val })
   }
   const addServer = () => {
-    const s = [...servers, { name: `server_${Date.now()}`, enabled: false, command: 'python3', args: [], env: {} }]
-    setServers(s); setExpanded(s.length - 1)
+    const created = { _key: nextKey(), name: `server_${Date.now()}`, enabled: false, command: 'python3', args: [], env: {} }
+    setServers(prev => [...prev, created])
+    setExpanded(created._key)
   }
-  const removeServer = (idx) => { setServers(prev => prev.filter((_, i) => i !== idx)); if (expanded === idx) setExpanded(null) }
+  const removeServer = (key) => {
+    setServers(prev => prev.filter(s => s._key !== key))
+    setExpanded(prev => prev === key ? null : prev)
+  }
 
   const isMiot = (s) => s.name === 'miot-mcp'
   const isHttp = (s) => !!s.url
@@ -121,11 +134,11 @@ export default function MCPView() {
 
       <div className="panel-list">
         {servers.length === 0 && <div className="panel-empty">{t('mcp_empty')}</div>}
-        {servers.map((srv, idx) => (
-          <div key={idx} className={`panel-card glass-panel ${srv.enabled ? '' : 'disabled'}`}>
-            <div className="panel-card-header" onClick={() => setExpanded(expanded === idx ? null : idx)}>
+        {servers.map(srv => (
+          <div key={srv._key} className={`panel-card glass-panel ${srv.enabled ? '' : 'disabled'}`}>
+            <div className="panel-card-header" onClick={() => setExpanded(expanded === srv._key ? null : srv._key)}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <button className="toggle-btn" onClick={e => { e.stopPropagation(); update(idx, 'enabled', !srv.enabled) }}>
+                <button className="toggle-btn" onClick={e => { e.stopPropagation(); update(srv._key, 'enabled', !srv.enabled) }}>
                   {srv.enabled ? <ToggleRight size={24} color="var(--accent-primary)" /> : <ToggleLeft size={24} color="var(--text-muted)" />}
                 </button>
                 <div>
@@ -149,35 +162,35 @@ export default function MCPView() {
                     <LogIn size={14} /> {t('btn_login')}
                   </button>
                 )}
-                <button className="icon-btn danger" onClick={e => { e.stopPropagation(); removeServer(idx) }}><Trash2 size={15}/></button>
+                <button className="icon-btn danger" onClick={e => { e.stopPropagation(); removeServer(srv._key) }}><Trash2 size={15}/></button>
               </div>
             </div>
 
-            {expanded === idx && (
+            {expanded === srv._key && (
               <div className="panel-card-body">
                 <div className="form-row">
                   <div className="form-group flex-1">
                     <label className="form-label">{t('mcp_server_name')}</label>
-                    <input className="form-input" value={srv.name} onChange={e => update(idx,'name',e.target.value)} />
+                    <input className="form-input" value={srv.name} onChange={e => update(srv._key,'name',e.target.value)} />
                   </div>
                 </div>
 
                 {isHttp(srv) ? (
                   <div className="form-group">
                     <label className="form-label">{t('mcp_url')}</label>
-                    <input className="form-input" value={srv.url || ''} onChange={e => update(idx,'url',e.target.value)} placeholder="https://..." />
+                    <input className="form-input" value={srv.url || ''} onChange={e => update(srv._key,'url',e.target.value)} placeholder="https://..." />
                   </div>
                 ) : (
                   <>
                     <div className="form-row">
                       <div className="form-group flex-1">
                         <label className="form-label">{t('mcp_command')}</label>
-                        <input className="form-input" value={srv.command || ''} onChange={e => update(idx,'command',e.target.value)} placeholder="python3" />
+                        <input className="form-input" value={srv.command || ''} onChange={e => update(srv._key,'command',e.target.value)} placeholder="python3" />
                       </div>
                     </div>
                     <div className="form-group">
                       <label className="form-label">{t('mcp_args')}</label>
-                      <textarea className="form-input form-textarea" rows={3} value={(srv.args || []).join('\n')} onChange={e => updateArgs(idx, e.target.value)} placeholder="../mcp/server.py" />
+                      <textarea className="form-input form-textarea" rows={3} value={(srv.args || []).join('\n')} onChange={e => updateArgs(srv._key, e.target.value)} placeholder="../mcp/server.py" />
                     </div>
                   </>
                 )}
@@ -189,7 +202,7 @@ export default function MCPView() {
                       <div key={k} className="env-var-row" style={{ marginBottom: 8 }}>
                         <input className="form-input env-key-input" value={k} readOnly style={{ opacity: 0.7 }} />
                         <span className="env-eq">=</span>
-                        <input className="form-input" value={v} onChange={e => updateEnvEntry(idx, k, e.target.value)} style={{ flex: 1 }} />
+                        <input className="form-input" value={v} onChange={e => updateEnvEntry(srv._key, k, e.target.value)} style={{ flex: 1 }} />
                       </div>
                     ))}
                   </div>

@@ -28,12 +28,12 @@ cron:
     - id: task_1779441378781
       name: 午睡 中午12：30 关灯
       cron: 30 12 * * 1-5
-      enabled: true
+      enabled: false
       prompt: 午睡 关闭所有灯光
     - id: task_1779441495277
       name: 午睡起床开灯
       cron: 30 13 * * 1-5
-      enabled: true
+      enabled: false
       prompt: "打开所有灯光 "
     - id: task_1779442273761
       name: 下班关灯

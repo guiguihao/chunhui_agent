@@ -47,6 +47,12 @@ function ModelSelect({ name, value, providers = [], onChange, allowEmpty = false
 }
 
 
+// .env 行的本地稳定标识：既做 React key，也做「显示/隐藏」状态的键。
+// 不能用数组下标（删行后整体前移 → 密钥在别的行上意外明文显示），
+// 也不能用变量名（输入时每个字符都会变 → 输入框失焦且状态被重置）。
+let envUid = 0
+const nextEnvKey = () => `e${++envUid}`
+
 const MEMORY_FILES = [
   { key: 'user_profile', label: 'User Profile', desc: '用户偏好与画像' },
   { key: 'knowledge', label: 'Knowledge', desc: '长期知识库与经验' },
@@ -130,7 +136,7 @@ export default function ConfigView() {
     try {
       const res = await fetch('/api/env')
       const data = await res.json()
-      setEnvLines(data.lines || [])
+      setEnvLines((data.lines || []).map(line => ({ ...line, _key: nextEnvKey() })))
     } catch (e) { console.error(e) }
     finally { setEnvLoading(false) }
   }
@@ -167,15 +173,16 @@ export default function ConfigView() {
   }
 
   const addEnvVar = () => {
-    setEnvLines(prev => [...prev, { type: 'var', key: '', value: '' }])
+    setEnvLines(prev => [...prev, { _key: nextEnvKey(), type: 'var', key: '', value: '' }])
   }
 
   const removeEnvLine = (idx) => {
     setEnvLines(prev => prev.filter((_, i) => i !== idx))
   }
 
-  const toggleHide = (idx) => {
-    setHiddenKeys(prev => ({ ...prev, [idx]: !prev[idx] }))
+  const toggleHide = (key) => {
+    // 默认是隐藏（hiddenKeys 里没有记录 → 视为 true），首次点击必须切到「显示」
+    setHiddenKeys(prev => ({ ...prev, [key]: !(prev[key] ?? true) }))
   }
 
   const isSensitive = (key = '') => /key|secret|token|password|pass|api/i.test(key)
@@ -493,16 +500,17 @@ export default function ConfigView() {
                 {envLines.map((line, idx) => {
                   if (line.type === 'comment') {
                     return (
-                      <div key={idx} className="env-comment-row">
+                      <div key={line._key} className="env-comment-row">
                         <span className="env-comment-text">{line.raw || '\u00a0'}</span>
                         <button className="icon-btn danger" onClick={() => removeEnvLine(idx)}><Trash2 size={13} /></button>
                       </div>
                     )
                   }
                   const sensitive = isSensitive(line.key)
-                  const hidden = hiddenKeys[idx] !== false && sensitive
+                  // 用行自身的稳定标识判断显隐，避免删行后下标前移导致密钥明文显示
+                  const hidden = hiddenKeys[line._key] !== false && sensitive
                   return (
-                    <div key={idx} className="env-var-row">
+                    <div key={line._key} className="env-var-row">
                       <Key size={14} className="env-key-icon" />
                       <input
                         className="form-input env-key-input"
@@ -520,7 +528,7 @@ export default function ConfigView() {
                           onChange={e => updateEnvLine(idx, 'value', e.target.value)}
                         />
                         {sensitive && (
-                          <button className="icon-btn env-eye-btn" onClick={() => toggleHide(idx)} title={hidden ? 'Show' : 'Hide'}>
+                          <button className="icon-btn env-eye-btn" onClick={() => toggleHide(line._key)} title={hidden ? 'Show' : 'Hide'}>
                             {hidden ? <Eye size={14} /> : <EyeOff size={14} />}
                           </button>
                         )}

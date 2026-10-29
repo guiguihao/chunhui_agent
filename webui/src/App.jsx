@@ -6,6 +6,7 @@ import CronView from './components/CronView'
 import HeartbeatView from './components/HeartbeatView'
 import MCPView from './components/MCPView'
 import { LanguageProvider } from './components/LanguageContext'
+import ErrorBoundary from './components/ErrorBoundary'
 
 function App() {
   const [currentView, setCurrentView] = useState('sessions')
@@ -22,14 +23,17 @@ function App() {
   }
 
   return (
-    <LanguageProvider>
-      <div className="app-container">
-        <Sidebar currentView={currentView} setCurrentView={setCurrentView} />
-        <main className="main-content">
-          {renderView()}
-        </main>
-      </div>
-    </LanguageProvider>
+    <ErrorBoundary>
+      <LanguageProvider>
+        <div className="app-container">
+          <Sidebar currentView={currentView} setCurrentView={setCurrentView} />
+          <main className="main-content">
+            {/* 单视图崩溃时只替换内容区，侧边栏仍可用来切换/自救；key 变化时自动复位错误态 */}
+            <ErrorBoundary key={currentView}>{renderView()}</ErrorBoundary>
+          </main>
+        </div>
+      </LanguageProvider>
+    </ErrorBoundary>
   )
 }
 
