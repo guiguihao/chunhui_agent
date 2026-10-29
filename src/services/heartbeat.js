@@ -1,9 +1,19 @@
 import cron from 'node-cron';
+import { toSessionId } from './coreagent.js';
+
+/** 动态巡检项的名称（由 AI 通过 mgmt_heartbeat_set 配置） */
+export const DYNAMIC_CHECK_NAME = '动态巡检';
 
 /**
  * 心跳机制
  * 定期执行系统自检和环境优化检查
  * 支持每个检查项单独设置 interval（cron 表达式）
+ *
+ * 检查项来源有两类：
+ *   1. 静态检查项：config/heartbeat.yaml 的 heartbeat.checks
+ *   2. 动态检查项：AI 通过 mgmt_heartbeat_get / mgmt_heartbeat_set 维护的内容，
+ *      持久化在 heartbeat.yaml 的 heartbeat.dynamic_prompt 字段。
+ *      之所以不与 checks 合并存放，是为了避免 WebUI 保存配置时被整块覆盖丢失。
  */
 class Heartbeat {
   constructor(agent, config = {}) {
@@ -11,9 +21,11 @@ class Heartbeat {
     this.enabled = config.enabled !== false;
     this.interval = config.interval || '*/5 * * * *'; // 全局默认 interval
     this.checks = config.checks || [];
-    this.tasks = [];       // 独立任务列表（替换原来的单一 task）
-    this.taskContent = '';
-    this.onWarning = null; // 警告回调: (message, result) => {}
+    this.tasks = [];            // 静态检查项任务列表
+    this.dynamicTask = null;    // 动态巡检任务
+    this.taskContent = config.dynamic_prompt || '';
+    this.onWarning = null;      // 警告回调: (message, result) => {}
+    this._onDynamicChanged = null; // 动态巡检内容变更回调（用于持久化）
   }
 
   /**
@@ -21,6 +33,14 @@ class Heartbeat {
    */
   setOnWarning(handler) {
     this.onWarning = handler;
+  }
+
+  /**
+   * 设置动态巡检内容变更回调（用于写入 heartbeat.yaml）
+   * @param {Function} handler - 接收 (content) 的回调
+   */
+  setOnDynamicChanged(handler) {
+    this._onDynamicChanged = handler;
   }
 
   /**
@@ -48,7 +68,13 @@ class Heartbeat {
       console.log(`[Heartbeat] Scheduled "${check.name}" (${checkInterval})`);
     }
 
-    console.log(`[Heartbeat] Started (${this.tasks.length} check task(s))`);
+    // 动态巡检项（AI 可通过 mgmt_heartbeat_set 调整）
+    this.dynamicTask = this._scheduleDynamic();
+    if (this.dynamicTask) {
+      console.log(`[Heartbeat] Scheduled "${DYNAMIC_CHECK_NAME}" (${this.interval})`);
+    }
+
+    console.log(`[Heartbeat] Started (${this.tasks.length} static + ${this.dynamicTask ? 1 : 0} dynamic check task(s))`);
   }
 
   /**
@@ -59,7 +85,38 @@ class Heartbeat {
       task.stop();
     }
     this.tasks = [];
+
+    if (this.dynamicTask) {
+      this.dynamicTask.stop();
+      this.dynamicTask = null;
+    }
     console.log('[Heartbeat] Stopped');
+  }
+
+  /**
+   * 为动态巡检内容创建调度任务；内容为空时返回 null
+   * @returns {object|null} node-cron 任务
+   */
+  _scheduleDynamic() {
+    const content = (this.taskContent || '').trim();
+    if (!content) return null;
+
+    return cron.schedule(this.interval, async () => {
+      await this._runCheck({ name: DYNAMIC_CHECK_NAME, prompt: content });
+    }, {
+      timezone: 'Asia/Shanghai',
+    });
+  }
+
+  /**
+   * 重新调度动态巡检（内容变更后立即生效，无需重启）
+   */
+  _rescheduleDynamic() {
+    if (this.dynamicTask) {
+      this.dynamicTask.stop();
+      this.dynamicTask = null;
+    }
+    this.dynamicTask = this._scheduleDynamic();
   }
 
   /**
@@ -71,6 +128,8 @@ class Heartbeat {
 
       if (this.agent && typeof this.agent.decide === 'function') {
         const result = await this.agent.decide(check.prompt, {
+          // 每个巡检项独占会话，避免不同巡检项与定时任务共享上下文
+          sessionId: toSessionId('hb', check.name),
           appendSystemPrompt: `当前检查项: ${check.name}\n如果发现异常，请在返回的 JSON 中设置 "is_warning": true 并提供 "reply" 说明情况。`,
         });
         console.log(`[Heartbeat] ${check.name} result:`, result);
@@ -100,14 +159,41 @@ class Heartbeat {
     for (const check of this.checks) {
       await this._runCheck(check);
     }
+    const content = (this.taskContent || '').trim();
+    if (content) {
+      await this._runCheck({ name: DYNAMIC_CHECK_NAME, prompt: content });
+    }
   }
 
+  /**
+   * 读取动态巡检指令内容
+   * @returns {string}
+   */
   getTaskContent() {
-    return this.taskContent;
+    return this.taskContent || '';
   }
 
+  /**
+   * 更新动态巡检指令内容并立即重新调度
+   *
+   * 此前该方法只写入一个无人消费的字段，AI 调用 mgmt_heartbeat_set 后
+   * 会收到「已更新心跳任务」但实际巡检内容并未改变，属于对模型的诱导性反馈。
+   *
+   * @param {string} content - 巡检指令；传空值表示清除动态巡检
+   */
   setTaskContent(content) {
-    this.taskContent = content;
+    this.taskContent = (content || '').trim();
+    this._rescheduleDynamic();
+
+    if (this.taskContent) {
+      console.log(`[Heartbeat] Dynamic check updated (${this.taskContent.substring(0, 40)}...)`);
+    } else {
+      console.log('[Heartbeat] Dynamic check cleared');
+    }
+
+    if (this._onDynamicChanged) {
+      this._onDynamicChanged(this.taskContent);
+    }
   }
 
   /**
@@ -122,13 +208,27 @@ class Heartbeat {
    * 更新配置并重启
    */
   updateConfig(config) {
-    const needRestart = config.interval && config.interval !== this.interval;
+    const prevEnabled = this.enabled;
+    const prevInterval = this.interval;
+    const prevDynamic = this.taskContent;
+
+    const checksChanged = Boolean(config.checks) && config.checks !== this.checks;
 
     if (config.enabled !== undefined) this.enabled = config.enabled;
     if (config.interval) this.interval = config.interval;
     if (config.checks) this.checks = config.checks;
+    // 热更新时同步动态巡检内容（WebUI 会回传该字段）
+    if (config.dynamic_prompt !== undefined) this.taskContent = config.dynamic_prompt || '';
 
-    if (needRestart || config.checks) {
+    const needRestart =
+      checksChanged ||
+      prevInterval !== this.interval ||
+      prevEnabled !== this.enabled ||
+      prevDynamic !== this.taskContent;
+
+    // 此前仅依赖 interval 变化判断重启，导致「先禁用再启用（interval 未变）」
+    // 的场景不会重启，心跳会永久停摆。此处额外检查是否尚无运行的任务。
+    if (needRestart || this.tasks.length === 0) {
       this.stop();
       this.start();
     }

@@ -79,3 +79,75 @@
   height: 18px;
   flex-shrink: 0;
 }
+
+.sidebar-footer {
+  margin-top: auto;
+  padding: 16px 12px 0 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.restart-msg {
+  font-size: 12px;
+  line-height: 1.4;
+  color: #f59e0b;
+  text-align: center;
+}
+
+.restart-msg.ok {
+  color: #10b981;
+}
+
+.restart-btn:hover:not(:disabled) svg {
+  color: #22c55e;
+}
+
+.restart-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 作用域限定在重启按钮内，避免与全局 .spin 定义冲突 */
+.restart-btn .spin {
+  animation: sidebar-spin 1s linear infinite;
+}
+
+@keyframes sidebar-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.lang-toggle-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.lang-toggle-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #f8fafc;
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.lang-toggle-btn svg {
+  color: #94a3b8;
+  transition: color 0.2s ease;
+}
+
+.lang-toggle-btn:hover svg {
+  color: #8b5cf6;
+}

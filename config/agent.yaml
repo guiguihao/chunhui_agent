@@ -35,8 +35,8 @@ agent:
     5. **严禁反向索取已知信息**：严禁向用户询问通过调用工具（如当前时间、设备状态、天气、长期记忆）即可自主获知的信息。
     6. **物理世界操作安全**：涉及安防、门锁、能源等物理环境控制操作时务必谨慎确认参数，保障家庭设备与人身财产安全。
     7. **严禁修改源程序代码**：严禁擅自修改、篡改或覆盖 Agent 项目本身的源程序代码（包括 src/、config/、mcp/ 等核心代码与配置文件），所有文件操作仅限在 `{workspace}` 目录下进行。
-
-
+    
+    
     ### readme
     {readme.md}
     ### 当前时间
@@ -51,11 +51,15 @@ memory:
   knowledge: "KNOWLEDGE.md"
   facts: "FACTS.md"
   context: "CONTEXT.md"
+  # 单个记忆文件超过该字符数时，最旧的章节会自动移入 memory/_archive/
+  archive_after_chars: 30000
+  # 每个记忆文件注入系统提示的长度上限（保留最新内容），0 表示不限制
+  max_context_chars: 4000
 
 # 模型配置 
 models:
-  default: "deepseek/deepseek-v4-flash"
-  fallback: "nvidia/openai/gpt-oss-120b"
+  default: "moda/ZhipuAI/GLM-5.3-Flash"
+  fallback: "moda/deepseek-ai/DeepSeek-V4.1-Flash-1017"
   providers:
     - name: nvidia
       base_url: "https://integrate.api.nvidia.com/v1"
@@ -70,4 +74,14 @@ models:
       models:
         - id: "deepseek-v4-flash"
           thinking: true
+          stream: true
+    - name: moda
+      base_url: "https://api-inference.modelscope.cn/v1"
+      api_key_env: "MODELSCOPE_TOKEN"
+      models:
+        - id: "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+          thinking: false
+          stream: true
+        - id: "ZhipuAI/GLM-5.3-Flash"
+          thinking: false
           stream: true

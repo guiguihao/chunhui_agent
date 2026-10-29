@@ -734,32 +734,82 @@ class FeishuService {
     }
 
     // 2. 累积 buffer + 定时 patch 更新飞书卡片
+    //    statusLine 用于展示思考/工具进度；它必须与正文分离，
+    //    否则中间轮的过渡文本会被混进最终回复（此前只用 onChunk 时的老问题）
     let buffer = '';
+    let statusLine = '';
+    let clearStatusOnNextContent = false;
     let patchTimer = null;
     let lastPatchContent = '🤔 思考中...';
 
+    const composeContent = () => {
+      if (!buffer && !statusLine) return null; // 保持"思考中..."
+      return statusLine ? `${statusLine}\n\n${buffer}`.trim() : buffer;
+    };
+
     const flushToFeishu = async () => {
-      // buffer 为空时不 patch，保持"思考中..."
-      if (!buffer || buffer === lastPatchContent) return;
+      const content = composeContent();
+      if (!content || content === lastPatchContent) return;
       try {
-        await this.patchCardMessage(messageId, buffer);
-        lastPatchContent = buffer;
+        await this.patchCardMessage(messageId, content);
+        lastPatchContent = content;
       } catch (e) {
         console.warn('[Feishu] Stream patch error: ' + e.message);
       }
+    };
+
+    // 状态行变化很有信息量且发生频率低，立即推送而不等待采样定时器，
+    // 否则执行较快的工具进度会被完全跳过。
+    const flushStatus = () => {
+      flushToFeishu().catch(e => console.warn('[Feishu] Status flush error: ' + e.message));
     };
 
     patchTimer = setInterval(() => {
       flushToFeishu().catch(e => console.warn('[Feishu] Patch timer error: ' + e.message));
     }, this.streamPatchInterval);
 
-    // 3. 调用 CoreAgent.decide，传入 onChunk 回调
+    // 3. 调用 CoreAgent.decide
+    //    必须使用 onStream：tool_start / tool_end / reasoning 只会通过该通道下发，
+    //    onChunk 仅能收到 content，导致工具进度与思考过程完全不可见。
     try {
       const result = await this.agent.decide(userMessage, {
         sessionId,
         appendSystemPrompt: FEISHU_SYSTEM_PROMPT,
-        onChunk: (text) => {
-          buffer += text;
+        onStream: (event) => {
+          switch (event.type) {
+            case 'content':
+              // 工具调用是多轮循环：每一轮模型都可能先输出一句过渡文本
+              // （例如"好的，我先查询设备状态。"），它只属于当前这一轮。
+              // 新一轮正文开始时必须丢弃上一轮的累积文本，否则这些过渡句
+              // 会被拼接进最终回复（旧实现仅用 onChunk 累积，存在该缺陷）。
+              if (clearStatusOnNextContent) {
+                statusLine = '';
+                buffer = '';
+                clearStatusOnNextContent = false;
+              }
+              buffer += event.content || '';
+              break;
+
+            case 'reasoning':
+              statusLine = '💭 正在思考...';
+              flushStatus();
+              break;
+
+            case 'tool_start':
+              statusLine = `🔧 正在执行 \`${event.name || '工具'}\` ...`;
+              flushStatus();
+              break;
+
+            case 'tool_end': {
+              const res = String(event.result || '');
+              const failed = /^(工具执行错误|操作拒绝|未知工具|MCP 工具|错误)/.test(res.trim());
+              statusLine = `${failed ? '⚠️' : '✅'} 已完成 \`${event.name || '工具'}\``;
+              // 下一轮正文到达时清理状态行与本轮文本
+              clearStatusOnNextContent = true;
+              flushStatus();
+              break;
+            }
+          }
         },
       });
 
@@ -778,7 +828,10 @@ class FeishuService {
     } catch (error) {
       clearInterval(patchTimer);
       try {
-        await this.patchCardMessage(messageId, buffer || '抱歉，处理过程中遇到了问题。');
+        await this.patchCardMessage(
+          messageId,
+          composeContent() || '抱歉，处理过程中遇到了问题。'
+        );
       } catch { }
       throw error;
     }

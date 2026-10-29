@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react'
 import { Save, RefreshCw, Plus, Trash2, ToggleLeft, ToggleRight, Clock } from 'lucide-react'
+import { useLanguage } from './LanguageContext'
 import './PanelView.css'
 
 export default function CronView() {
+  const { t } = useLanguage()
   const [tasks, setTasks]     = useState([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving]   = useState(false)
@@ -21,8 +23,8 @@ export default function CronView() {
     try {
       const r = await fetch('/api/cron', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tasks }) })
       const d = await r.json()
-      setSaveMsg(d.success ? '✓ Saved' : `Error: ${d.error}`)
-    } catch(e) { setSaveMsg(`Error: ${e.message}`) }
+      setSaveMsg(d.success ? t('save_ok') : `${t('save_err')}${d.error}`)
+    } catch(e) { setSaveMsg(`${t('save_err')}${e.message}`) }
     finally { setSaving(false); setTimeout(() => setSaveMsg(''), 3000) }
   }
 
@@ -37,27 +39,27 @@ export default function CronView() {
 
   const removeTask = (idx) => { setTasks(prev => prev.filter((_, i) => i !== idx)); if (expanded === idx) setExpanded(null) }
 
-  if (loading) return <div className="panel-loading"><RefreshCw size={20} className="spin" /> Loading...</div>
+  if (loading) return <div className="panel-loading"><RefreshCw size={20} className="spin" /> {t('btn_saving')}</div>
 
   return (
     <div className="panel-view fade-in">
       <header className="view-header flex-between">
         <div>
-          <h1 className="view-title">Cron Tasks</h1>
-          <p className="view-subtitle">Scheduled tasks — {tasks.filter(t => t.enabled).length} active / {tasks.length} total</p>
+          <h1 className="view-title">{t('cron_title')}</h1>
+          <p className="view-subtitle">{t('cron_subtitle', { active: tasks.filter(t => t.enabled).length, total: tasks.length })}</p>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          {saveMsg && <span className={`save-msg ${saveMsg.startsWith('✓') ? 'ok' : 'err'}`}>{saveMsg}</span>}
-          <button className="btn btn-outline" onClick={addTask}><Plus size={15} /> Add Task</button>
+          {saveMsg && <span className={`save-msg ${saveMsg.startsWith('✓') || saveMsg.includes('成功') ? 'ok' : 'err'}`}>{saveMsg}</span>}
+          <button className="btn btn-outline" onClick={addTask}><Plus size={15} /> {t('btn_add_task')}</button>
           <button className="btn btn-primary" onClick={save} disabled={saving}>
             {saving ? <RefreshCw className="spin" size={15}/> : <Save size={15}/>}
-            {saving ? 'Saving...' : 'Save'}
+            {saving ? t('btn_saving') : t('btn_save')}
           </button>
         </div>
       </header>
 
       <div className="panel-list">
-        {tasks.length === 0 && <div className="panel-empty">No tasks. Click "Add Task" to create one.</div>}
+        {tasks.length === 0 && <div className="panel-empty">{t('cron_empty')}</div>}
         {tasks.map((task, idx) => (
           <div key={idx} className={`panel-card glass-panel ${task.enabled ? '' : 'disabled'}`}>
             <div className="panel-card-header" onClick={() => setExpanded(expanded === idx ? null : idx)}>
@@ -66,7 +68,7 @@ export default function CronView() {
                   {task.enabled ? <ToggleRight size={24} color="var(--accent-primary)" /> : <ToggleLeft size={24} color="var(--text-muted)" />}
                 </button>
                 <div>
-                  <div className="panel-card-title">{task.name || <em style={{opacity:0.4}}>Unnamed Task</em>}</div>
+                  <div className="panel-card-title">{task.name || <em style={{opacity:0.4}}>{t('cron_unnamed')}</em>}</div>
                   <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
                     <span className="cron-badge"><Clock size={11} /> {task.cron}</span>
                     <span className="id-badge">{task.id}</span>
@@ -80,21 +82,21 @@ export default function CronView() {
               <div className="panel-card-body">
                 <div className="form-row">
                   <div className="form-group flex-1">
-                    <label className="form-label">Task ID</label>
-                    <input className="form-input" value={task.id} onChange={e => update(idx,'id',e.target.value)} placeholder="unique_id" />
+                    <label className="form-label">{t('cron_id')}</label>
+                    <input className="form-input" value={task.id} onChange={e => update(idx,'id',e.target.value)} placeholder={t('cron_id_placeholder')} />
                   </div>
                   <div className="form-group flex-1">
-                    <label className="form-label">Task Name</label>
-                    <input className="form-input" value={task.name} onChange={e => update(idx,'name',e.target.value)} placeholder="e.g. Morning Report" />
+                    <label className="form-label">{t('cron_name')}</label>
+                    <input className="form-input" value={task.name} onChange={e => update(idx,'name',e.target.value)} placeholder={t('cron_name_placeholder')} />
                   </div>
                   <div className="form-group" style={{ minWidth: 180 }}>
-                    <label className="form-label">Cron Expression</label>
-                    <input className="form-input" value={task.cron} onChange={e => update(idx,'cron',e.target.value)} placeholder="0 9 * * *" />
+                    <label className="form-label">{t('cron_expr')}</label>
+                    <input className="form-input" value={task.cron} onChange={e => update(idx,'cron',e.target.value)} placeholder={t('cron_expr_placeholder')} />
                   </div>
                 </div>
                 <div className="form-group">
-                  <label className="form-label">Prompt</label>
-                  <textarea className="form-input form-textarea" rows={4} value={task.prompt} onChange={e => update(idx,'prompt',e.target.value)} placeholder="Agent instruction..." />
+                  <label className="form-label">{t('cron_prompt')}</label>
+                  <textarea className="form-input form-textarea" rows={4} value={task.prompt} onChange={e => update(idx,'prompt',e.target.value)} placeholder={t('cron_prompt_placeholder')} />
                 </div>
               </div>
             )}

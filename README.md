@@ -161,8 +161,47 @@ urealagent_new/
 ## 🛡️ 安全与沙箱机制
 
 1. **环境隔离**：所有敏感凭证（如 Home Assistant JWT Token、各类 API Key）严格通过 `.env` 注入，杜绝硬编码。
-2. **文件系统沙箱**：CoreAgent 内置文件工具（`file_write` / `file_append` / `file_delete` / `file_edit`）被严格限定在 `workspace/` 目录下，严禁越权修改或覆盖系统源代码及核心配置文件。
-3. **接口防越权**：WebUI 静态资源服务已拦截 `.env*`、`.git/`、`config/` 及各类密钥证书的读取访问。
+2. **文件系统沙箱**：所有文件工具读写均受统一策略（`src/services/pathguard.js`）约束 —— 写操作仅限 `workspace/`；读操作默认仅限 `workspace/`，`~/.miot-mcp` 等目录仅可读图片资源，其余路径一律拒绝。判定使用 `path.relative()`，杜绝 `workspace-evil` 类前缀绕过。
+3. **敏感黑名单优先**：无论位于哪个目录，`.env*`、`.ssh/`、`.aws/`、`*.pem`/`*.key`/`*.db` 及含 `token`/`secret`/`credential` 的文件一律拒绝访问。
+4. **接口防越权**：WebUI 的 `/api/file`、`/api/memory` 复用同一套策略，禁止读取 `.env`、`config/` 及各类密钥证书。
+
+> 若需让 Agent 读取额外目录，可在 `config/agent.yaml` 中配置：
+> ```yaml
+> agent:
+>   file_read_roots:
+>     - "/data/reports"
+> ```
+
+---
+
+## 🧪 测试
+
+```bash
+npm test                 # 全部测试
+npm run test:unit        # 单元测试（无网络依赖）
+npm run test:integration # 集成测试
+npm run test:smoke       # 配置完整性冒烟测试
+npm run test:cov         # 带覆盖率
+```
+
+---
+
+## ♻️ 记忆生命周期
+
+记忆文件（`memory/*.md`）此前只增不减且每轮全量注入提示词，token 成本随时间线性上升。现提供治理参数，在 `config/agent.yaml` 中配置：
+
+```yaml
+memory:
+  # 单个文件超过该字符数时，最旧的章节自动移入 memory/_archive/
+  archive_after_chars: 30000
+  # 每个文件注入系统提示的长度上限（保留最新内容），0 表示不限制
+  max_context_chars: 4000
+
+agent:
+  prompt:
+    # 是否将完整 README 注入系统提示（默认 false，改用精简摘要）
+    include_readme: false
+```
 
 ---
 

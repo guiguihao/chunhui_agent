@@ -5,6 +5,11 @@ import path from 'path';
  * 记忆系统管理
  * 负责读取和写入 memory/ 目录下的文件
  */
+/** 单个记忆文件的归档阈值（超出后最旧的章节会被移入 _archive/） */
+const DEFAULT_ARCHIVE_AFTER_CHARS = 30000;
+/** 默认注入到系统提示的记忆长度上限（按文件计） */
+const DEFAULT_MAX_CONTEXT_CHARS = 4000;
+
 class MemoryService {
   constructor(config = {}) {
     this.directory = config.directory || './memory';
@@ -12,6 +17,9 @@ class MemoryService {
     this.knowledgeFile = config.knowledge || 'KNOWLEDGE.md';
     this.factsFile = config.facts || 'FACTS.md';
     this.contextFile = config.context || 'CONTEXT.md';
+    // 记忆生命周期治理参数
+    this.archiveAfterChars = config.archive_after_chars ?? DEFAULT_ARCHIVE_AFTER_CHARS;
+    this.maxContextChars = config.max_context_chars ?? DEFAULT_MAX_CONTEXT_CHARS;
   }
 
   /**
@@ -36,10 +44,76 @@ class MemoryService {
         }
       }
       
+      // 治理：多个记忆文件此前只增不减、且每轮全量注入提示词，
+      // 导致 token 成本随时间线性上升。启动时对超标文件做一次冷归档。
+      for (const file of files) {
+        const moved = await this.archiveOverflow(file);
+        if (moved > 0) {
+          console.log(`[Memory] Archived ${moved} section(s) from ${file}`);
+        }
+      }
+
       console.log('[Memory] Initialized');
     } catch (error) {
       console.error('[Memory] Init error:', error.message);
       throw error;
+    }
+  }
+
+  /**
+   * 当单个记忆文件超出体积阈值时，把「最旧」的章节移入 _archive/
+   *
+   * 以 "## " 为章节边界拆分，从最新章节开始反向累积直至达到预算，
+   * 其余较旧章节整体归档（保留文件头，避免丢失文档标题）。
+   *
+   * @param {string} filename - 目标文件名
+   * @returns {Promise<number>} 归档的章节数（0 表示无需归档）
+   */
+  async archiveOverflow(filename) {
+    const maxChars = this.archiveAfterChars;
+    if (!(maxChars > 0)) return 0; // 0 或负数表示关闭归档
+
+    try {
+      const filePath = path.join(this.directory, filename);
+      const content = await fs.readFile(filePath, 'utf-8');
+      if (content.length <= maxChars) return 0;
+
+      const parts = content.split(/^(?=## )/m);
+      if (parts.length <= 1) return 0; // 无章节边界，无法拆分
+
+      const header = parts[0];
+      const sections = parts.slice(1);
+
+      // 从最新章节反向累积，保留不超过预算的最新内容
+      const kept = [];
+      let size = header.length;
+      for (let i = sections.length - 1; i >= 0; i--) {
+        if (size + sections[i].length > maxChars) break;
+        kept.unshift(sections[i]);
+        size += sections[i].length;
+      }
+
+      // 若连「最新的一章」都放不进预算，说明阈值过小或单条目过大，
+      // 此时若继续归档会清空整个文件 —— 必须放弃归档，绝不牺牲数据。
+      if (kept.length === 0) {
+        console.warn(`[Memory] ${filename} 单章节已超出归档阈值(${maxChars})，跳过归档以避免数据丢失`);
+        return 0;
+      }
+
+      const toArchive = sections.slice(0, sections.length - kept.length);
+      if (toArchive.length === 0) return 0;
+
+      const archiveDir = path.join(this.directory, '_archive');
+      await fs.mkdir(archiveDir, { recursive: true });
+      const stamp = new Date().toISOString().slice(0, 10);
+      const dest = path.join(archiveDir, `${path.basename(filename, '.md')}-${stamp}.md`);
+      await fs.appendFile(dest, toArchive.join('') + '\n\n', 'utf-8');
+      await fs.writeFile(filePath, header + kept.join(''), 'utf-8');
+
+      return toArchive.length;
+    } catch (error) {
+      console.warn(`[Memory] Archive error (${filename}): ${error.message}`);
+      return 0;
     }
   }
 
@@ -204,14 +278,26 @@ class MemoryService {
 
   /**
    * 获取所有记忆内容 (用于构建 AI 上下文)
-   * @returns {object} 所有记忆
+   *
+   * 默认对每个文件做长度上限裁剪，保留「最新」部分。
+   * 此前是全文注入，KNOWLEDGE.md 等文件体量增长后会显著推高 token 成本与延迟。
+   *
+   * @param {object} [options]
+   * @param {number} [options.maxChars] - 每个文件的字符上限；0 表示不限制（全文）
+   * @returns {Promise<object>} 所有记忆
    */
-  async getAll() {
+  async getAll({ maxChars } = {}) {
+    const limit = maxChars ?? this.maxContextChars;
+    const trim = (s) => {
+      const str = s || '';
+      if (!(limit > 0) || str.length <= limit) return str;
+      return `…（较早内容已省略，详见 memory/ 原始文件）\n${str.slice(-limit)}`;
+    };
     return {
-      userProfile: await this.loadUserProfile(),
-      knowledge: await this.loadKnowledge(),
-      facts: await this.loadFacts(),
-      context: await this.loadContext(),
+      userProfile: trim(await this.loadUserProfile()),
+      knowledge: trim(await this.loadKnowledge()),
+      facts: trim(await this.loadFacts()),
+      context: trim(await this.loadContext()),
     };
   }
 }

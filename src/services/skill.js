@@ -130,6 +130,30 @@ class SkillService {
   }
 
   /**
+   * 加载技能模块
+   *
+   * Node 的 ESM loader 以「完整 URL（含查询串）」作为缓存键。
+   * 旧实现使用 `?t=${Date.now()}`，导致每次调用都产生全新 URL：
+   *   1. 永不命中缓存 → 长期运行会持续泄漏模块实例（及模块持有的句柄/定时器）
+   *   2. 模块级单例被反复重建 → 与 daemon 复用等逻辑冲突
+   * 改为使用文件 mtime 作为版本号：文件未变更则复用同一模块实例，
+   * 文件变更时版本号随之改变，开发期的热重载效果依然保留。
+   *
+   * @param {string} filePath - 技能文件的绝对路径
+   * @returns {Promise<object>} 模块命名空间对象
+   */
+  async _importSkillModule(filePath) {
+    let version = '';
+    try {
+      const stat = await fs.stat(filePath);
+      version = String(stat.mtimeMs);
+    } catch (e) {
+      console.warn(`[Skill] 读取技能文件状态失败，使用无版本号加载: ${e.message}`);
+    }
+    return await import(`file://${filePath}${version ? `?v=${version}` : ''}`);
+  }
+
+  /**
    * 执行指定技能
    */
   async run(name, params = {}, agent) {
@@ -139,7 +163,7 @@ class SkillService {
 
     try {
       if (foundPath.endsWith('.js')) {
-        const module = await import(`file://${foundPath}?t=${Date.now()}`);
+        const module = await this._importSkillModule(foundPath);
         const executeFn = module.default || module.execute;
         return await executeFn(agent, params);
       } else if (foundPath.endsWith('.md')) {

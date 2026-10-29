@@ -3,7 +3,7 @@
 heartbeat:
   enabled: true
   # 检查间隔 (cron 表达式)
-  interval: "*/60 * * * *"  # 每5分钟
+  interval: "*/5 * * * *"  # 每5分钟（注意：*/60 表示仅在第 0 分触发，即每小时一次）
   
   # 检查项
   checks:

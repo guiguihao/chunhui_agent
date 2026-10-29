@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Send, User, Bot, Plus, Cpu, ChevronDown, ChevronUp, CheckCircle2, Loader2 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { useLanguage } from './LanguageContext'
 import './SessionView.css'
 
 // 提取文本中的所有图片路径或 URL，包含本地绝对路径、file:/// 协议和普通 http/https 链接
@@ -60,6 +61,7 @@ function MessageItem({ msg }) {
   const [showThinking, setShowThinking] = useState(true);
   const [expandedTools, setExpandedTools] = useState({});
   const [lightboxSrc, setLightboxSrc] = useState(null);
+  const { t } = useLanguage();
 
   const toggleTool = (toolId) => {
     setExpandedTools(prev => ({
@@ -101,7 +103,7 @@ function MessageItem({ msg }) {
             <div className="thinking-header" onClick={() => setShowThinking(!showThinking)}>
               <span className="thinking-title flex-items-center">
                 <Cpu size={14} className={`thinking-icon ${!msg.isThinkingFinished ? 'spin-animation' : ''}`} />
-                AI 思考过程 {!msg.isThinkingFinished ? '(正在思考...)' : '(已完成)'}
+                {t('thinking_title')} {!msg.isThinkingFinished ? t('thinking_status_active') : t('thinking_status_finished')}
               </span>
               {showThinking ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
             </div>
@@ -127,11 +129,11 @@ function MessageItem({ msg }) {
                       ) : (
                         <CheckCircle2 size={14} className="tool-icon-status done" />
                       )}
-                      调用工具: <code className="tool-name-code">{tool.name}</code>
+                      {t('tool_call_prefix')}<code className="tool-name-code">{tool.name}</code>
                     </span>
                     <div className="tool-header-right flex-items-center">
                       <span className={`tool-status-badge ${tool.status}`}>
-                        {tool.status === 'running' ? '正在执行' : '执行完成'}
+                        {tool.status === 'running' ? t('tool_status_running') : t('tool_status_done')}
                       </span>
                       {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                     </div>
@@ -139,12 +141,12 @@ function MessageItem({ msg }) {
                   {isExpanded && (
                     <div className="tool-details-content">
                       <div className="tool-section">
-                        <span className="tool-section-label">参数:</span>
+                        <span className="tool-section-label">{t('tool_section_args')}</span>
                         <pre className="tool-code"><code>{tool.args}</code></pre>
                       </div>
                       {tool.result && (
                         <div className="tool-section">
-                          <span className="tool-section-label">输出:</span>
+                          <span className="tool-section-label">{t('tool_section_result')}</span>
                           <pre className="tool-code"><code>{tool.result}</code></pre>
                         </div>
                       )}
@@ -181,7 +183,7 @@ function MessageItem({ msg }) {
                       src={webUrl} 
                       className="chat-embedded-image chat-thumbnail"
                       onClick={() => setLightboxSrc(webUrl)}
-                      title="点击查看大图"
+                      title={t('lightbox_hover')}
                       {...props} 
                     />
                   );
@@ -204,11 +206,11 @@ function MessageItem({ msg }) {
                   key={idx} 
                   className="message-image-card glass-panel"
                   onClick={() => setLightboxSrc(img.webUrl)}
-                  title="点击查看大图"
+                  title={t('lightbox_hover')}
                 >
                   <img 
                     src={img.webUrl} 
-                    alt={`图片 ${idx + 1}`} 
+                    alt={`${t('lightbox_title')} ${idx + 1}`} 
                     className="message-inline-image"
                     onError={(e) => {
                       e.target.parentElement.style.display = 'none';
@@ -225,7 +227,7 @@ function MessageItem({ msg }) {
         {lightboxSrc && (
           <Lightbox 
             src={lightboxSrc} 
-            alt="大图预览" 
+            alt={t('lightbox_title')} 
             onClose={() => setLightboxSrc(null)} 
           />
         )}
@@ -236,6 +238,7 @@ function MessageItem({ msg }) {
 
 // ───────── 主组件 ─────────
 export default function SessionView() {
+  const { t } = useLanguage();
   const [sessionId] = useState(() => {
     const savedId = localStorage.getItem('webui_session_id');
     if (savedId) return savedId;
@@ -245,7 +248,7 @@ export default function SessionView() {
   });
 
   const [messages, setMessages] = useState([
-    { id: 1, role: 'system', content: 'Agent initialized and ready. Please type a message to interact.' }
+    { id: 1, role: 'system', content: t('msg_init') }
   ])
   const [input, setInput] = useState('')
   const [isTyping, setIsTyping] = useState(false)
@@ -294,11 +297,11 @@ export default function SessionView() {
       });
       
       if (!response.ok) {
-        throw new Error(`请求出错: ${response.statusText}`);
+        throw new Error(`${t('request_error')}${response.statusText}`);
       }
 
       if (!response.body) {
-        throw new Error('浏览器不支持 Stream 流式读取。');
+        throw new Error(t('stream_error'));
       }
 
       const reader = response.body.getReader();
@@ -384,7 +387,7 @@ export default function SessionView() {
                 setMessages(prev => prev.map(m => m.id === assistantMsgId ? {
                   ...m,
                   isThinkingFinished: true,
-                  content: m.content + `\n\n⚠️ **系统执行出错**: ${event.message}`
+                  content: m.content + `\n\n⚠️ **${t('system_error')}**: ${event.message}`
                 } : m));
               }
             } catch (err) {
@@ -397,7 +400,7 @@ export default function SessionView() {
       setMessages(prev => [...prev, { 
         id: Date.now(), 
         role: 'assistant', 
-        content: `Error: ${err.message}` 
+        content: `${t('request_error')}${err.message}` 
       }])
     } finally {
       setIsTyping(false)
@@ -413,7 +416,7 @@ export default function SessionView() {
       });
       // /api/chat now streams SSE — drain and discard the body to close cleanly
       if (res.body) await res.body.cancel();
-      setMessages([{ id: Date.now(), role: 'system', content: 'Session restarted.' }])
+      setMessages([{ id: Date.now(), role: 'system', content: t('msg_restarted') }])
     } catch(err) {
       console.error(err)
     }
@@ -423,11 +426,11 @@ export default function SessionView() {
     <div className="session-view fade-in">
       <header className="view-header flex-between">
         <div>
-          <h1 className="view-title">Active Session</h1>
-          <p className="view-subtitle">Monitor and interact with the agent in real-time (Session: {sessionId})</p>
+          <h1 className="view-title">{t('session_title')}</h1>
+          <p className="view-subtitle">{t('session_subtitle', { id: sessionId })}</p>
         </div>
         <button className="btn btn-outline" onClick={handleNewSession}>
-          <Plus size={16} /> New Session
+          <Plus size={16} /> {t('btn_new_session')}
         </button>
       </header>
 
@@ -453,7 +456,7 @@ export default function SessionView() {
           <input 
             type="text" 
             className="chat-input"
-            placeholder="Type a command or message..."
+            placeholder={t('chat_placeholder')}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyPress={(e) => e.key === 'Enter' && handleSend()}

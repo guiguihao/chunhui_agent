@@ -1,5 +1,6 @@
 import { createRuntime, createServerProxy, callOnce } from 'mcporter';
 import path from 'path';
+import { sanitizeToolName, dedupeToolName } from '../src/services/toolname.js';
 
 /**
  * 带有超时控制的 Promise 包装器
@@ -42,6 +43,7 @@ class MCPorterService {
     this.serverProxies = {};  // serverName → ServerProxy
     this.mcpTools = [];       // OpenAI function-calling 格式的工具列表
     this.toolMap = {};        // toolPrefix → { server, toolName }
+    this._takenToolNames = new Set(); // 已占用的工具名，用于去重
   }
 
   /**
@@ -100,8 +102,12 @@ class MCPorterService {
           this.serverProxies[serverName] = createServerProxy(this.runtime, serverName);
 
           // 4. 将每个工具转换为 OpenAI function-calling 格式
+          //    工具名必须在此处就完成清洗并与 toolMap 的键保持一致：
+          //    若等到 coreagent 发送前才清洗，LLM 拿到的名字将与 toolMap 对不上，
+          //    导致调用时永远返回「MCP 工具未注册」。
           for (const tool of tools) {
-            const toolPrefix = `mcp_${serverName}_${tool.name}`;
+            const rawPrefix = `mcp_${serverName}_${tool.name}`;
+            const toolPrefix = this._uniqueToolName(sanitizeToolName(rawPrefix));
             this.mcpTools.push(this._convertToOpenAITool(toolPrefix, tool));
             this.toolMap[toolPrefix] = {
               server: serverName,
@@ -211,6 +217,22 @@ class MCPorterService {
         return `MCP 工具调用失败: ${error.message} (Fallback error: ${fallbackError.message})`;
       }
     }
+  }
+
+  /**
+   * 为工具名分配唯一名称
+   * 不同 MCP Server 的工具名可能在清洗后重名（如 "a.b" 与 "a_b"），
+   * 重名会导致 OpenAI API 直接拒绝整个请求，必须在此阶段去重。
+   *
+   * @param {string} cleanedName - 已清洗的工具名
+   * @returns {string} 唯一工具名
+   */
+  _uniqueToolName(cleanedName) {
+    const finalName = dedupeToolName(this._takenToolNames, cleanedName);
+    if (finalName !== cleanedName) {
+      console.warn(`[MCPorter] MCP 工具名清洗后重名: "${cleanedName}" → "${finalName}"`);
+    }
+    return finalName;
   }
 
   /**

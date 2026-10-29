@@ -7,10 +7,61 @@ import fs from 'fs/promises';
 import path from 'path';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
+import { getAllTools } from './tools/registry.js';
+import {
+  handleToolCall, handleMemoryTool, handleFileTool, editFile,
+  handleCommandTool, handleManagementTool, handleMCPToolCall, getFilePolicy,
+} from './tools/dispatcher.js';
+import { trimHistory, normalizeMessages, cleanHistory } from './session/history.js';
 
 dotenv.config();
 
 const DEFAULT_SYSTEM_PROMPT = `You are a helpful AI assistant named "{name}".`;
+
+/**
+ * README 的精简摘要，替代全文注入系统提示。
+ *
+ * 系统提示中真正需要的是「我能用哪些能力」与「边界在哪」，
+ * 而不是 README 的安装教程、目录树与架构图。
+ */
+const README_SUMMARY = `## 项目
+本地运行的智能家居 AI Agent（Node.js ESM），工作目录为 $WORKSPACE$，
+所有产出文件请写入该目录。
+
+## 可用能力
+- 记忆：用户画像 / 长期知识 / 事实记录 / 当前上下文
+- 定时任务：添加、删除、查询、启停（持久化于 config/cron.yaml）
+- 心跳巡检：静态巡检项 + 可由你维护的动态巡检指令
+- 文件读写：仅限工作目录，禁止触碰凭据与配置
+- 命令执行：通过 cmd_exec 调用技能（如 generate_image / weather / browser-use）
+- MCP 工具：mcp_ 前缀，按需调用
+
+## 边界
+- 不得读取或修改凭据、配置、源码文件
+- 严禁虚假汇报：工具返回失败必须如实相告，不得编造结果`;
+
+/**
+ * 构造安全的 sessionId
+ *
+ * sessionId 会直接作为文件名写入 sessions/<id>.json，而 AI 动态创建的
+ * 定时任务 ID 可能包含空格、斜杠等字符，必须清洗后再使用，否则会抛 ENOENT。
+ *
+ * @param {string} prefix - 前缀，用于区分会话来源（cron / hb 等）
+ * @param {string} raw - 原始标识（任务 ID、巡检项名称等）
+ * @returns {string} 安全的 sessionId
+ */
+export function toSessionId(prefix, raw) {
+  // 注意：这里刻意保留中文等 Unicode 字符。
+  // 若照搬工具名的 ASCII 白名单策略，"系统健康"/"安全巡检" 等纯中文巡检项
+  // 会被全部清洗成同一个 id，反而让它们重新共用一份会话，失去隔离意义。
+  const slug = String(raw ?? '')
+    .replace(/[/?<>\\:*|"]/g, '_')   // 文件名非法字符
+    .replace(/[\x00-\x1f\x7f]/g, '') // 控制字符
+    .replace(/\s+/g, '_')            // 空白 → 下划线
+    .replace(/^[._]+/, '')           // 避免产生隐藏文件或 "." / ".."
+    .slice(0, 48);
+  return slug ? `${prefix}_${slug}` : prefix;
+}
 
 class CoreAgent {
   constructor(modelConfig = {}) {
@@ -67,6 +118,10 @@ class CoreAgent {
     this._mcpService = null;     // MCPorterService 实例
     this._readmeCache = null;    // README.md 内容缓存
     this._onCronTasksChanged = null; // Cron 任务变更回调
+    this._fileReadRoots = modelConfig.fileReadRoots || []; // 额外只读根目录（agent.yaml: agent.file_read_roots）
+    this._filePolicy = null;     // 延迟构建的文件访问策略
+    this.includeFullReadme = modelConfig.includeFullReadme === true; // 是否注入完整 README
+    this.maxMemoryContextChars = modelConfig.memoryMaxContextChars ?? null; // 记忆注入上限
   }
 
   setSkill(skillService) {
@@ -156,7 +211,9 @@ class CoreAgent {
   async _loadMemoryContext() {
     if (!this._memoryService) return '';
     try {
-      const all = await this._memoryService.getAll();
+      const all = await this._memoryService.getAll({
+        maxChars: this.maxMemoryContextChars ?? undefined,
+      });
       const profile = all.userProfile || '';
       const knowledge = all.knowledge || '';
       const facts = all.facts || '';
@@ -178,919 +235,71 @@ class CoreAgent {
       }
     }
 
+    // README 全文约 4KB，含安装步骤与 ASCII 架构图，对任务执行毫无帮助，
+    // 却每轮都被注入提示词（乘以心跳/cron 调用，成本可观），也易与运行时
+    // 实际状态冲突造成指令干扰。默认改为注入精简摘要，可通过配置改回全文。
+    const readmeContent = this.includeFullReadme ? this._readmeCache : README_SUMMARY;
+    const workspace = this._workspace || process.cwd();
+
     return this.systemPrompt
-      .replace('{name}', this.name)
-      .replace(/{workspace}/g, this._workspace || process.cwd())
-      .replace('{readme.md}', this._readmeCache)
+      .replace(/\{name\}/g, this.name)
+      .replace(/{workspace}/g, workspace)
+      // 摘要中的工作目录占位符必须在此替换：{workspace} 的替换先于本占位符，
+      // 否则会残留字面量
+      .replace('{readme.md}', readmeContent.replace(/\$WORKSPACE\$/g, workspace))
       .replace('{time}', new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }));
   }
 
+  /**
+   * 获取文件访问策略（延迟构建，详见 tools/dispatcher.js）
+   * @returns {object} FileAccessPolicy
+   */
+  getFilePolicy() {
+    return getFilePolicy(this);
+  }
+
   async _getAllTools(filter = null) {
-    let tools = [];
-
-    if (this._memoryService) {
-      tools.push(
-        {
-          type: 'function',
-          function: {
-            name: 'memory_get_user_profile',
-            description: '获取用户偏好设置',
-            parameters: { type: 'object', properties: {}, required: [] },
-          },
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'memory_update_user_profile',
-            description: '更新（追加）用户偏好设置',
-            parameters: {
-              type: 'object',
-              properties: {
-                content: { type: 'string', description: '需要追加的偏好内容' },
-              },
-              required: ['content'],
-            },
-          },
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'memory_get_knowledge',
-            description: '获取长期知识库与经验记录',
-            parameters: { type: 'object', properties: {}, required: [] },
-          },
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'memory_get_context',
-            description: '获取当前对话背景与即时上下文信息',
-            parameters: { type: 'object', properties: {}, required: [] },
-          },
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'memory_update_context',
-            description: '更新当前对话背景与即时上下文信息（用于保存最新的关键背景或阶段性状态）',
-            parameters: {
-              type: 'object',
-              properties: {
-                content: { type: 'string', description: '完整的上下文背景内容' },
-              },
-              required: ['content'],
-            },
-          },
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'memory_update_knowledge',
-            description: '更新（追加）长期知识库与经验记录（用于保存有价值的长期信息）',
-            parameters: {
-              type: 'object',
-              properties: {
-                content: { type: 'string', description: '需要追加的长期信息（支持 Markdown 格式）' },
-              },
-              required: ['content'],
-            },
-          },
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'memory_get_facts',
-            description: '获取重要事实记录与关键数据',
-            parameters: { type: 'object', properties: {}, required: [] },
-          },
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'memory_update_facts',
-            description: '更新（追加）重要事实记录与关键数据',
-            parameters: {
-              type: 'object',
-              properties: {
-                content: { type: 'string', description: '需要追加的事实或关键数据' },
-              },
-              required: ['content'],
-            },
-          },
-        }
-      );
-    }
-
-    if (this._scheduler) {
-      tools.push(
-        {
-          type: 'function',
-          function: {
-            name: 'mgmt_cron_list',
-            description: '列出当前所有定时任务',
-            parameters: { type: 'object', properties: {}, required: [] },
-          },
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'mgmt_cron_add',
-            description: '添加一个新的定时任务',
-            parameters: {
-              type: 'object',
-              properties: {
-                task_id: { type: 'string', description: '唯一英文 ID' },
-                name: { type: 'string', description: '任务名称' },
-                cron: { type: 'string', description: '5段 cron 表达式' },
-                description: { type: 'string', description: '任务指令' },
-              },
-              required: ['task_id', 'name', 'cron', 'description'],
-            },
-          },
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'mgmt_cron_remove',
-            description: '删除一个定时任务',
-            parameters: {
-              type: 'object',
-              properties: {
-                task_id: { type: 'string', description: '任务 ID' },
-              },
-              required: ['task_id'],
-            },
-          },
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'mgmt_cron_toggle',
-            description: '启用或禁用一个定时任务',
-            parameters: {
-              type: 'object',
-              properties: {
-                task_id: { type: 'string', description: '任务 ID' },
-                enabled: { type: 'boolean', description: 'true=启用，false=禁用' },
-              },
-              required: ['task_id', 'enabled'],
-            },
-          },
-        }
-      );
-    }
-
-    if (this._heartbeat) {
-      tools.push(
-        {
-          type: 'function',
-          function: {
-            name: 'mgmt_heartbeat_get',
-            description: '读取当前心跳巡检的任务指令内容',
-            parameters: { type: 'object', properties: {}, required: [] },
-          },
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'mgmt_heartbeat_set',
-            description: '修改心跳巡检任务的指令内容',
-            parameters: {
-              type: 'object',
-              properties: {
-                content: { type: 'string', description: '新的心跳任务指令' },
-              },
-              required: ['content'],
-            },
-          },
-        }
-      );
-    }
-
-    // 文件操作工具（沙箱化：限制在工作目录）
-    tools.push(
-      {
-        type: 'function',
-        function: {
-          name: 'file_read',
-          description: '读取文件内容（仅限工作目录，禁止读取敏感配置文件）',
-          parameters: {
-            type: 'object',
-            properties: {
-              path: { type: 'string', description: '文件相对路径或工作区内绝对路径' },
-            },
-            required: ['path'],
-          },
-        },
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'file_write',
-          description: '向工作区写入文件内容（覆盖写入，仅限工作目录）',
-          parameters: {
-            type: 'object',
-            properties: {
-              path: { type: 'string', description: '目标文件相对路径' },
-              content: { type: 'string', description: '要写入的文件内容' },
-            },
-            required: ['path', 'content'],
-          },
-        },
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'file_append',
-          description: '向工作区文件追加内容（仅限工作目录）',
-          parameters: {
-            type: 'object',
-            properties: {
-              path: { type: 'string', description: '目标文件相对路径' },
-              content: { type: 'string', description: '要追加的文件内容' },
-            },
-            required: ['path', 'content'],
-          },
-        },
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'file_exists',
-          description: '检查指定文件或目录是否存在',
-          parameters: {
-            type: 'object',
-            properties: {
-              path: { type: 'string', description: '文件路径' },
-            },
-            required: ['path'],
-          },
-        },
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'file_list',
-          description: '列出工作区指定目录下的文件列表',
-          parameters: {
-            type: 'object',
-            properties: {
-              path: { type: 'string', description: '目录路径，默认工作目录根路径' },
-            },
-            required: [],
-          },
-        },
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'file_delete',
-          description: '删除工作区内的文件（仅限工作目录）',
-          parameters: {
-            type: 'object',
-            properties: {
-              path: { type: 'string', description: '要删除的文件相对路径' },
-            },
-            required: ['path'],
-          },
-        },
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'file_edit',
-          description: '编辑工作区文件内容（支持插入行、删除行、替换行、文本替换等，仅限工作目录）',
-          parameters: {
-            type: 'object',
-            properties: {
-              path: { type: 'string', description: '目标文件路径' },
-              find: { type: 'string', description: '要查找的文本或正则' },
-              replace: { type: 'string', description: '替换后的新文本' },
-              insert_line: { type: 'number', description: '在此行号前插入内容' },
-              content: { type: 'string', description: '插入或替换的文本内容' },
-              replace_line: { type: 'number', description: '替换指定行号内容' },
-              delete_line: { type: 'number', description: '删除指定行号' },
-              all: { type: 'boolean', description: '是否替换所有匹配项' },
-              regex: { type: 'boolean', description: '是否将 find 作为正则表达式' },
-            },
-            required: ['path'],
-          },
-        },
-      }
-    );
-
-    // 技能工具
-    if (this._skillService) {
-      // 1. 保留底层系统交互指令 (cmd_exec)
-      tools.push(
-        {
-          type: 'function',
-          function: {
-            name: 'cmd_exec',
-            description: '在服务器上执行终端命令（如运行 Python 脚本）。对于生图、浏览器自动化等耗时任务，请通过 timeout_ms 设置足够的超时时间（生图建议 600000 即 10 分钟）。',
-            parameters: {
-              type: 'object',
-              properties: {
-                command: { type: 'string', description: '要执行的完整命令字符串' },
-                timeout_ms: { type: 'number', description: '超时时间（毫秒）。默认 30000，普通 Python 脚本自动使用 120000，生图等耐时脚本建议传入 600000。' },
-                cwd: { type: 'string', description: '命令执行目录（可选）' },
-              },
-              required: ['command'],
-            },
-          },
-        }
-      );
-
-      // 2. 动态映射具体技能为顶级工具
-      try {
-        const skillList = await this._skillService.list();
-        for (const skill of skillList) {
-          // 避免与内置工具冲突
-          if (['cmd_exec'].includes(skill.name)) continue;
-
-          // 优先使用技能定义的 parameters，如果未定义则使用兜底 schema
-          const skillParameters = skill.parameters || {
-            type: 'object',
-            properties: {
-              query: { type: 'string', description: '传递给技能的参数说明，如搜索词或指令内容' },
-            },
-            additionalProperties: true,
-          };
-
-          tools.push({
-            type: 'function',
-            function: {
-              // 统一使用下划线，并移除任何不符合 API 要求的非法字符 (^[a-zA-Z0-9_-]+$)
-              name: skill.name.replace(/-/g, '_').replace(/[^a-zA-Z0-9_-]/g, '_'),
-              description: `[Skill] ${skill.description || skill.name}`,
-              parameters: skillParameters,
-            },
-          });
-        }
-      } catch (e) {
-        console.error(`[CoreAgent] 获取技能列表失败: ${e.message}`);
-      }
-    }
-
-    // MCP 工具
-    if (this._mcpTools.length > 0) {
-      tools.push(...this._mcpTools);
-    }
-
-    // 应用过滤器
-    if (typeof filter === 'function') {
-      tools = tools.filter(filter);
-    }
-
-    // 最终防御：确保所有工具名都符合 API 要求 (^[a-zA-Z0-9_-]+$)
-    // 将不合法字符替换为下划线，并移除首尾多余下划线
-    tools = tools.map(t => {
-      if (!t?.function?.name) return t;
-      const cleanedName = t.function.name
-        .replace(/[^a-zA-Z0-9_-]/g, '_') // 替换非法字符
-        .replace(/^_+|_+$/g, '')         // 移除首尾下划线
-        .replace(/__+/g, '_')            // 合并连续下划线
-        || 'tool';                       // 防止空名
-      if (cleanedName !== t.function.name) {
-        console.warn(`[CoreAgent] 工具名含非法字符已自动清理: "${t.function.name}" → "${cleanedName}"`);
-      }
-      return {
-        ...t,
-        function: { ...t.function, name: cleanedName },
-      };
-    });
-
-    return tools;
+    return getAllTools(this, filter);
   }
 
-  /**
-   * 处理工具调用（异步）
-   */
   async _handleToolCall(toolName, args = {}) {
-    // 过滤掉可能由某些模型输出附加的特殊标记后缀 (如 <|channel|>commentary)
-    const cleanToolName = typeof toolName === 'string' ? toolName.replace(/<\|.*$/, '').trim() : toolName;
-
-    if (cleanToolName.startsWith('memory_')) {
-      return await this._handleMemoryTool(cleanToolName, args);
-    } else if (cleanToolName.startsWith('mgmt_')) {
-      return this._handleManagementTool(cleanToolName, args);
-    } else if (cleanToolName.startsWith('mcp_')) {
-      return await this._handleMCPToolCall(cleanToolName, args);
-    } else if (cleanToolName.startsWith('file_')) {
-      return await this._handleFileTool(cleanToolName, args);
-    } else if (cleanToolName.startsWith('cmd_')) {
-      return await this._handleCommandTool(cleanToolName, args);
-    }
-
-    // 兜底：尝试作为动态映射的技能处理
-    if (this._skillService) {
-      const skills = await this._skillService.list();
-      const targetSkill = skills.find(s => s.name.replace(/-/g, '_') === cleanToolName);
-      if (targetSkill) {
-        console.log(`[CoreAgent] 动态路由技能工具: ${cleanToolName} -> ${targetSkill.name}`);
-        const result = await this._skillService.run(targetSkill.name, args, this);
-
-        // 自动脱壳：如果返回的是 {response: '...'} 或 {reply: '...'}，只取内容
-        if (result && typeof result === 'object') {
-          return result.response || result.reply || JSON.stringify(result);
-        }
-        return String(result);
-      }
-    }
-
-    return `未知工具: ${cleanToolName}`;
+    return handleToolCall(this, toolName, args);
   }
 
-  /**
-   * 处理记忆工具调用（异步，通过 MemoryService 的正式方法读写）
-   */
   async _handleMemoryTool(toolName, args = {}) {
-    if (!this._memoryService) return '记忆服务未配置';
-
-    try {
-      switch (toolName) {
-        case 'memory_get_user_profile':
-          return await this._memoryService.loadUserProfile();
-        case 'memory_update_user_profile':
-          await this._memoryService.updateUserProfile(args.content);
-          return '已更新用户偏好';
-        case 'memory_get_knowledge':
-          return await this._memoryService.loadKnowledge();
-        case 'memory_update_knowledge':
-          await this._memoryService.updateKnowledge(args.content);
-          return '已更新长期知识库';
-        case 'memory_get_facts':
-          return await this._memoryService.loadFacts();
-        case 'memory_update_facts':
-          await this._memoryService.updateFacts(args.content);
-          return '已更新事实记录';
-        case 'memory_get_context':
-          return await this._memoryService.loadContext();
-        case 'memory_update_context':
-          await this._memoryService.updateContext(args.content);
-          return '已更新对话背景';
-        default:
-          return `未知记忆工具: ${toolName}`;
-      }
-    } catch (e) {
-      return `错误: ${e.message}`;
-    }
+    return handleMemoryTool(this, toolName, args);
   }
 
-  /**
-   * 处理文件工具调用（沙箱化：强制限定在 workspace 目录内）
-   */
   async _handleFileTool(toolName, args = {}) {
-    // 动态导入 fs 模块（ESM 环境）
-    const { promises: fs } = await import('fs');
-    const path = await import('path');
-
-    try {
-      const workspaceDir = path.resolve(process.cwd(), this._workspace || './workspace');
-      const rawPath = args.path || '.';
-      // 如果传入相对路径，优先基于 workspace 目录解析
-      const resolvedPath = path.isAbsolute(rawPath)
-        ? path.resolve(rawPath)
-        : path.resolve(workspaceDir, rawPath);
-
-      const baseName = path.basename(resolvedPath).toLowerCase();
-
-      // 1. 拦截敏感文件读取
-      const isSensitive = baseName.startsWith('.env') ||
-        baseName.endsWith('.key') ||
-        baseName.endsWith('.pem') ||
-        baseName.endsWith('.db') ||
-        resolvedPath.includes('/.git/');
-
-      if (isSensitive) {
-        return '操作拒绝: 禁止访问系统核心配置文件或密钥凭据。';
-      }
-
-      // 2. 写操作安全沙箱（严禁写出 workspace 目录，保护核心源码和配置）
-      const writeOps = ['file_write', 'file_append', 'file_delete', 'file_edit'];
-      if (writeOps.includes(toolName)) {
-        if (!resolvedPath.startsWith(workspaceDir)) {
-          return `操作拒绝: 为保障安全，所有文件新建/修改/删除仅允许在工作目录 (${this._workspace || './workspace'}) 内进行。`;
-        }
-      }
-
-      switch (toolName) {
-        case 'file_read':
-          const content = await fs.readFile(resolvedPath, 'utf8');
-          return content;
-
-        case 'file_write':
-          await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
-          await fs.writeFile(resolvedPath, args.content || '', 'utf8');
-          return `已写入文件: ${path.relative(workspaceDir, resolvedPath)}`;
-
-        case 'file_append':
-          await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
-          await fs.appendFile(resolvedPath, args.content || '', 'utf8');
-          return `已追加到文件: ${path.relative(workspaceDir, resolvedPath)}`;
-
-        case 'file_exists':
-          try {
-            await fs.access(resolvedPath);
-            return 'true';
-          } catch {
-            return 'false';
-          }
-
-        case 'file_delete':
-          await fs.unlink(resolvedPath);
-          return `已删除文件: ${path.relative(workspaceDir, resolvedPath)}`;
-
-        case 'file_list':
-          const files = await fs.readdir(resolvedPath);
-          return files.join('\n');
-
-        case 'file_edit':
-          return await this._editFile(fs, resolvedPath, args);
-
-        default:
-          return `未知文件工具: ${toolName}`;
-      }
-    } catch (e) {
-      return `文件操作错误: ${e.message}`;
-    }
+    return handleFileTool(this, toolName, args);
   }
 
-  /**
-   * 编辑文件 - 支持行号插入/删除/替换、正则查找替换
-   * @param {object} fs - fs.promises 对象
-   * @param {string} filePath - 文件路径
-   * @param {object} args - 编辑参数
-   * @returns {string} 操作结果
-   */
   async _editFile(fs, filePath, args) {
-    try {
-      // 读取原文件内容
-      let content = '';
-      try {
-        content = await fs.readFile(filePath, 'utf8');
-      } catch (e) {
-        if (e.code !== 'ENOENT') throw e; // 文件不存在则创建空内容
-      }
-
-      const lines = content.split('\n');
-
-      // 1. 行号操作 (insert_line/replace_line/delete_line)
-      if (args.insert_line !== undefined) {
-        const lineNum = parseInt(args.insert_line);
-        if (lineNum < 0 || lineNum > lines.length) {
-          return `❌ 行号超出范围 (0-${lines.length})`;
-        }
-        lines.splice(lineNum, 0, args.content || '');
-      }
-
-      if (args.replace_line !== undefined) {
-        const lineNum = parseInt(args.replace_line);
-        if (lineNum < 0 || lineNum >= lines.length) {
-          return `❌ 行号超出范围 (0-${lines.length - 1})`;
-        }
-        lines[lineNum] = args.content || '';
-      }
-
-      if (args.delete_line !== undefined) {
-        const lineNum = parseInt(args.delete_line);
-        if (lineNum < 0 || lineNum >= lines.length) {
-          return `❌ 行号超出范围 (0-${lines.length - 1})`;
-        }
-        lines.splice(lineNum, 1);
-      }
-
-      // 2. 查找替换操作 (find/replace/all)
-      if (args.find) {
-        const findStr = args.find;
-        const replaceStr = args.replace || '';
-        const findAll = args.all === true;
-
-        let replaced = false;
-        if (args.regex) {
-          // 正则表达式查找替换
-          try {
-            const regex = new RegExp(findStr, 'g'); // 默认全局匹配
-            for (let i = 0; i < lines.length; i++) {
-              if (regex.test(lines[i])) {
-                lines[i] = lines[i].replace(regex, replaceStr);
-                replaced = true;
-                if (!findAll) break;
-              }
-            }
-          } catch (e) {
-            return `❌ 正则表达式错误: ${e.message}`;
-          }
-        } else {
-          // 普通字符串查找替换
-          for (let i = 0; i < lines.length; i++) {
-            if (lines[i].includes(findStr)) {
-              lines[i] = lines[i].replace(findStr, replaceStr);
-              replaced = true;
-              if (!findAll) break;
-            }
-          }
-        }
-
-        if (!replaced) {
-          return `❌ 未找到匹配内容: "${findStr}"`;
-        }
-      }
-
-      // 写入文件
-      const newContent = lines.join('\n');
-      await fs.writeFile(filePath, newContent, 'utf8');
-      return `✅ 已编辑文件: ${filePath}`;
-
-    } catch (e) {
-      return `❌ 编辑文件失败: ${e.message}`;
-    }
+    return editFile(fs, filePath, args);
   }
 
-  /**
-   * 处理命令工具调用
-   */
   async _handleCommandTool(toolName, args = {}) {
-    // 动态导入 child_process 模块（ESM 环境）
-    const { exec } = await import('child_process');
-    const util = await import('util');
-    const execAsync = util.promisify(exec);
-
-    try {
-      switch (toolName) {
-        case 'cmd_exec':
-          let finalCommand = args.command;
-
-          // 只对 browser-use open 子命令注入 --headed（有头模式）
-          // 其他子命令（state/eval/click/cookies 等）不注入，避免脱离已有 daemon
-          if (finalCommand.startsWith('browser-use ')) {
-            const isOpenCmd = /^browser-use\s+(--\S+\s+)*open(\s|$)/.test(finalCommand);
-            if (isOpenCmd && !finalCommand.includes('--headed') &&
-              process.env.BROWSER_USE_HEADLESS === 'false') {
-              // 先关闭可能残留的 headless daemon，确保新 daemon 以 headed 模式启动
-              finalCommand = `browser-use close >/dev/null 2>&1; ` +
-                finalCommand.replace('browser-use ', 'browser-use --headed ');
-            }
-          }
-
-          console.log(`[CoreAgent] cmd_exec 实际执行: ${finalCommand.substring(0, 120)}`);
-
-          // 超时策略：自动识别耐时命令类型
-          let defaultTimeout = 30000;
-          if (args.timeout_ms) {
-            // AI 显式指定，优先级最高
-            defaultTimeout = args.timeout_ms;
-          } else if (/python3?\s/i.test(finalCommand)) {
-            // Python 脚本默认 2 分钟（简单脚本），生图/浏览器类超 10 分钟自动详记
-            const isLongRunning = /gemini_image|gemini_canvas|browser|playwright|selenium/i.test(finalCommand);
-            defaultTimeout = isLongRunning ? 600000 : 120000;
-            console.log(`[CoreAgent] 跑测 ${isLongRunning ? '耐时' : '普通'} Python 脚本，超时设为 ${defaultTimeout / 1000}s`);
-          }
-
-          const { stdout, stderr } = await execAsync(finalCommand, {
-            cwd: args.cwd || process.cwd(),
-            env: { ...process.env, ...args.env },
-            timeout: defaultTimeout,
-            maxBuffer: 10 * 1024 * 1024 // 10MB
-          });
-          return stdout || stderr || '(无输出)';
-
-        default:
-          return `未知命令工具: ${toolName}`;
-      }
-    } catch (e) {
-      return `命令执行错误: ${e.message}`;
-    }
+    return handleCommandTool(this, toolName, args);
   }
-  /**
-   * 处理管理工具调用
-   */
+
   _handleManagementTool(toolName, args = {}) {
-    switch (toolName) {
-      case 'mgmt_cron_list':
-        if (!this._scheduler) return '调度器未配置';
-        const tasks = this._scheduler.listTasks() || [];
-        if (!tasks.length) return '无定时任务';
-        return tasks.map(t => `[${t.id}] ${t.name} (${t.cron})`).join('\n');
-
-      case 'mgmt_cron_add':
-        if (!this._scheduler) return '调度器未配置';
-        const taskConfig = {
-          id: args.task_id,
-          name: args.name,
-          cron: args.cron,
-          prompt: args.description,
-          enabled: true,
-        };
-        this._scheduler.register(args.task_id, args.cron, async () => {
-          if (this._onCronTaskExecute) {
-            await this._onCronTaskExecute(args.description, taskConfig);
-          } else {
-            console.warn(`[CoreAgent] Cron task ${args.task_id} fired but no executor set`);
-          }
-        }, { name: args.name, prompt: args.description });
-        if (this._onCronTasksChanged) {
-          this._onCronTasksChanged();
-        }
-        return `已添加定时任务: ${args.task_id}`;
-
-      case 'mgmt_cron_remove':
-        if (!this._scheduler) return '调度器未配置';
-        this._scheduler.unregister(args.task_id);
-        if (this._onCronTasksChanged) {
-          this._onCronTasksChanged();
-        }
-        return `已删除定时任务: ${args.task_id}`;
-
-      case 'mgmt_cron_toggle':
-        if (!this._scheduler) return '调度器未配置';
-        let toggleResult = '';
-        if (args.enabled) {
-          const ok = this._scheduler.enable(args.task_id);
-          toggleResult = ok ? `已启用任务: ${args.task_id}` : `任务 ${args.task_id} 不存在，无法启用`;
-        } else {
-          const ok = this._scheduler.disable(args.task_id);
-          toggleResult = ok ? `已禁用任务: ${args.task_id}` : `任务 ${args.task_id} 不存在，无法禁用`;
-        }
-        if (this._onCronTasksChanged) {
-          this._onCronTasksChanged();
-        }
-        return toggleResult;
-
-      case 'mgmt_heartbeat_get':
-        if (!this._heartbeat) return '心跳未配置';
-        return this._heartbeat.getTaskContent() || '';
-
-      case 'mgmt_heartbeat_set':
-        if (!this._heartbeat) return '心跳未配置';
-        this._heartbeat.setTaskContent(args.content);
-        return '已更新心跳任务';
-
-      default:
-        return `未知管理工具: ${toolName}`;
-    }
+    return handleManagementTool(this, toolName, args);
   }
 
-  /**
-   * 处理 MCP 工具调用 — 通过 MCPorterService 执行
-   * @param {string} toolPrefix - 如 "mcp_context7_resolve-library-id"
-   * @param {object} args - 工具参数
-   * @returns {string} 工具结果
-   */
   async _handleMCPToolCall(toolPrefix, args = {}) {
-    const mapping = this._mcpToolMap[toolPrefix];
-    if (!mapping) {
-      return `MCP 工具未注册: ${toolPrefix}`;
-    }
-
-    if (!this._mcpService) {
-      return 'MCP 服务未配置';
-    }
-
-    try {
-      const result = await this._mcpService.callTool(toolPrefix, args);
-      console.log(`[CoreAgent] MCP: ${toolPrefix} → ${String(result).substring(0, 80)}`);
-      return result;
-    } catch (e) {
-      return `MCP 工具调用失败: ${e.message}`;
-    }
+    return handleMCPToolCall(this, toolPrefix, args);
   }
 
-  /**
-   * 截断历史消息，保留完整的 tool_call ↔ tool_result 配对
-   * @param {Array} history - 原始历史
-   * @param {number} maxLen - 最大保留条数
-   * @returns {Array} 截断后的历史
-   */
   _trimHistory(history, maxLen) {
-    if (history.length <= maxLen) return history;
-
-    let trimmed = history.slice(history.length - maxLen);
-
-    // ── 新增：总字符数限制，防止上下文过长 ──
-    const MAX_TOTAL_CHARS = 60000;
-    let currentTotal = trimmed.reduce((sum, msg) => sum + (msg.content?.length || 0), 0);
-
-    while (currentTotal > MAX_TOTAL_CHARS && trimmed.length > 2) {
-      const removed = trimmed.shift(); // 移除最旧的消息
-      currentTotal -= (removed.content?.length || 0);
-    }
-
-    // 检查开头是否有孤立的 tool_result（对应的 tool_call 被截掉了）
-    const orphanStart = trimmed.findIndex(
-      (msg, idx) => msg.role === 'tool' && idx === 0
-    );
-    if (orphanStart !== -1 && orphanStart === 0) {
-      // 跳过所有连续的 orphan tool_result
-      let skip = 0;
-      while (skip < trimmed.length && trimmed[skip].role === 'tool') {
-        skip++;
-      }
-      trimmed = trimmed.slice(skip);
-    }
-
-    // 同样检查开头是否有 tool_calls 但缺少后续 tool_result 的 assistant 消息
-    while (trimmed.length > 0) {
-      const first = trimmed[0];
-      if (first.role === 'assistant' && first.tool_calls && first.tool_calls.length > 0) {
-        // 检查紧跟的消息是否是对应第一个 tool_call 的 tool_result
-        if (trimmed.length > 1 && trimmed[1].role === 'tool') {
-          break; // 配对完整，保留
-        }
-        // 缺少 tool_result，移除这条 assistant 消息
-        trimmed = trimmed.slice(1);
-      } else {
-        break;
-      }
-    }
-
-    return trimmed;
+    return trimHistory(history, maxLen);
   }
 
   _normalizeMessages(history) {
-    const result = [];
-    for (let i = 0; i < history.length; i++) {
-      const msg = history[i];
-
-      // 检查助手消息是否包含工具调用
-      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-        const callIds = msg.tool_calls.map(tc => tc.id);
-        const toolMsgs = [];
-        let j = i + 1;
-
-        // 查找紧随其后的所有工具响应消息
-        while (j < history.length && (history[j].role === 'tool' || history[j].tool_call_id)) {
-          if (callIds.includes(history[j].tool_call_id)) {
-            toolMsgs.push(history[j]);
-          }
-          j++;
-        }
-
-        // 只有当所有工具调用都有对应的响应时，才保留这一段
-        if (toolMsgs.length === callIds.length) {
-          result.push({
-            role: 'assistant',
-            content: msg.content || null,
-            tool_calls: msg.tool_calls,
-          });
-          for (const tm of toolMsgs) {
-            result.push({
-              role: 'tool',
-              tool_call_id: tm.tool_call_id,
-              content: tm.content,
-            });
-          }
-          i = j - 1; // 跳过已处理的消息
-        } else {
-          console.warn(`[CoreAgent] 检测到不完整的工具调用序列（索引 ${i}），已跳过以防止 API 错误。`);
-          // 跳过该助手消息及后续不完整的工具消息
-          i = j - 1;
-        }
-      } else if (msg.role === 'tool' || msg.tool_call_id) {
-        // 孤立的工具消息，跳过
-        console.warn(`[CoreAgent] 检测到孤立的工具响应消息（索引 ${i}），已跳过。`);
-      } else {
-        // 普通用户/助手消息
-        result.push({
-          role: msg.role,
-          content: msg.content || '',
-        });
-      }
-    }
-    return result;
+    return normalizeMessages(history);
   }
 
-  /**
-   * 清理原始历史记录中的不完整工具调用序列（用于持久化存储前的净化）
-   * 与 _normalizeMessages 不同，保留所有字段（如 reasoning_content）
-   */
   _cleanHistory(history) {
-    const result = [];
-    for (let i = 0; i < history.length; i++) {
-      const msg = history[i];
-      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-        const callIds = msg.tool_calls.map(tc => tc.id);
-        let j = i + 1;
-        const toolMsgs = [];
-        while (j < history.length && (history[j].role === 'tool' || history[j].tool_call_id)) {
-          if (callIds.includes(history[j].tool_call_id)) toolMsgs.push(history[j]);
-          j++;
-        }
-        if (toolMsgs.length === callIds.length) {
-          result.push(msg);
-          for (const tm of toolMsgs) result.push(tm);
-        } else {
-          console.warn(`[CoreAgent] _cleanHistory: 跳过不完整工具调用（索引 ${i}，期望 ${callIds.length} 个响应，实际 ${toolMsgs.length} 个）`);
-        }
-        i = j - 1;
-      } else if (msg.role === 'tool' || msg.tool_call_id) {
-        // 孤立的 tool 消息，跳过
-        console.warn(`[CoreAgent] _cleanHistory: 跳过孤立工具响应（索引 ${i}）`);
-      } else {
-        result.push(msg);
-      }
-    }
-    return result;
+    return cleanHistory(history);
   }
 
   async _saveSession(sessionId, history) {
@@ -1254,6 +463,7 @@ class CoreAgent {
     // 缓存单次决策（决定）循环内的工具调用记录，用于检测和拦截无限重试/死循环
     const executedToolCalls = new Map();
 
+    try {
     for (let i = 0; i < this.maxToolIterations; i++) {
       const requestOptions = {
         model: this.model,
@@ -1391,49 +601,61 @@ class CoreAgent {
 
       if (msgToStore.tool_calls && msgToStore.tool_calls.length > 0) {
         for (const tc of msgToStore.tool_calls) {
+          // 部分 OpenAI 兼容实现对无参工具会省略 arguments（undefined/null），
+          // 此处统一兜底为空串，避免后续字符串操作抛 TypeError 击穿整个 decide()
+          const rawArgs = typeof tc.function.arguments === 'string'
+            ? tc.function.arguments
+            : '';
+
           let args = {};
           try {
-            args = JSON.parse(tc.function.arguments);
+            args = rawArgs ? JSON.parse(rawArgs) : {};
           } catch (e) {
-            console.warn(`[CoreAgent] 工具参数解析失败: ${tc.function.name}, raw: ${tc.function.arguments}`);
+            console.warn(`[CoreAgent] 工具参数解析失败: ${tc.function.name}, raw: ${rawArgs}`);
           }
 
-          if (onStream) {
-            let parsedArgs = args;
-            try { parsedArgs = JSON.parse(tc.function.arguments); } catch { parsedArgs = args; }
-            onStream({
-              type: 'tool_start',
-              id: tc.id,
-              name: tc.function.name,
-              arguments: parsedArgs
-            });
-          }
-
-          // 规范化参数的空白符，确保比对键稳定性
-          const callKey = `${tc.function.name}:${tc.function.arguments.replace(/\s+/g, '')}`;
           let displayResult;
 
-          if (executedToolCalls.has(callKey)) {
-            const prev = executedToolCalls.get(callKey);
-            console.warn(`[CoreAgent] ⚠ 检测到在同一次决策循环中重复调用工具: ${tc.function.name}，进行拦截并直接返回先前结果`);
-            displayResult = prev.result;
-            // 如果上一次调用执行失败了，追加系统指令提示强力引导 LLM 停止无限重试并跳出循环
-            if (prev.isError && !displayResult.includes('【系统提示】')) {
-              displayResult += `\n\n【系统提示】该工具在此轮对话中已调用过且执行失败。严禁重复调用相同参数的相同工具！请仔细分析先前的错误原因，尝试其他合适的方法/工具，或直接向用户汇报该错误。`;
-            }
-          } else {
-            const result = await this._handleToolCall(tc.function.name, args);
-            displayResult = typeof result === 'object' ? JSON.stringify(result) : String(result);
-
-            // 限制工具输出长度，防止撑爆上下文 (约 20,000 字符)
-            if (displayResult.length > 20000) {
-              console.log(`[CoreAgent] 工具 ${tc.function.name} 输出过长 (${displayResult.length})，已截断`);
-              displayResult = displayResult.substring(0, 20000) + "\n\n(内容过长，已截断...)";
+          try {
+            if (onStream) {
+              onStream({
+                type: 'tool_start',
+                id: tc.id,
+                name: tc.function.name,
+                arguments: args
+              });
             }
 
-            // 判断是否为错误或失败结果（匹配常见错误和 success: false 字样）
-            const isError = /error|failed|失败|错误|未登录|not connected|RuntimeError|success":\s*false/i.test(displayResult);
-            executedToolCalls.set(callKey, { isError, result: displayResult });
+            // 规范化参数的空白符，确保比对键稳定性
+            const callKey = `${tc.function.name}:${rawArgs.replace(/\s+/g, '')}`;
+
+            if (executedToolCalls.has(callKey)) {
+              const prev = executedToolCalls.get(callKey);
+              console.warn(`[CoreAgent] ⚠ 检测到在同一次决策循环中重复调用工具: ${tc.function.name}，进行拦截并直接返回先前结果`);
+              displayResult = prev.result;
+              // 如果上一次调用执行失败了，追加系统指令提示强力引导 LLM 停止无限重试并跳出循环
+              if (prev.isError && !displayResult.includes('【系统提示】')) {
+                displayResult += `\n\n【系统提示】该工具在此轮对话中已调用过且执行失败。严禁重复调用相同参数的相同工具！请仔细分析先前的错误原因，尝试其他合适的方法/工具，或直接向用户汇报该错误。`;
+              }
+            } else {
+              const result = await this._handleToolCall(tc.function.name, args);
+              displayResult = typeof result === 'object' ? JSON.stringify(result) : String(result);
+
+              // 限制工具输出长度，防止撑爆上下文 (约 20,000 字符)
+              if (displayResult.length > 20000) {
+                console.log(`[CoreAgent] 工具 ${tc.function.name} 输出过长 (${displayResult.length})，已截断`);
+                displayResult = displayResult.substring(0, 20000) + "\n\n(内容过长，已截断...)";
+              }
+
+              // 判断是否为错误或失败结果（匹配常见错误和 success: false 字样）
+              const isError = /error|failed|失败|错误|未登录|not connected|RuntimeError|success":\s*false/i.test(displayResult);
+              executedToolCalls.set(callKey, { isError, result: displayResult });
+            }
+          } catch (toolError) {
+            // 单个工具无论如何失败都必须降级为「返回给模型的错误文本」，
+            // 绝不能向上冒泡，否则本轮所有已成功执行的工具结果都会丢失。
+            console.error(`[CoreAgent] 工具执行异常: ${tc.function.name} - ${toolError.message}`);
+            displayResult = `工具执行错误: ${toolError.message}`;
           }
 
           if (onStream) {
@@ -1456,6 +678,19 @@ class CoreAgent {
         finalResponse = msgToStore.content || '';
         break;
       }
+    }
+    } catch (loopError) {
+      // 决策循环异常时仍需落盘：本轮可能已执行过若干工具，
+      // 直接丢弃会导致工具副作用与对话状态不一致。
+      console.error(`[CoreAgent] 决策循环异常: ${loopError.message}`);
+      try {
+        this._sessions[sessionId] = workingHistory;
+        await this._saveSession(sessionId, workingHistory);
+        console.log(`[CoreAgent] 异常已保存会话快照: ${sessionId}`);
+      } catch (saveError) {
+        console.error(`[CoreAgent] 异常状态下保存会话失败: ${saveError.message}`);
+      }
+      throw loopError;
     }
 
     // 执行成功，更新内存会话状态并保存

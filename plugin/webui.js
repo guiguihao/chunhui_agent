@@ -5,6 +5,78 @@ import path from 'path';
 import yaml from 'yaml';
 import os from 'os';
 import { log } from 'console';
+import { isInside } from '../src/services/pathguard.js';
+
+/**
+ * 将 .env 变量的值格式化为安全字面量
+ *
+ * 读取侧（GET /api/env）会剥掉值的引号，因此保存时必须按需补回：
+ * 若值包含空格、#、引号或反斜杠却不加引号，dotenv 会把 `#` 之后当成注释，
+ * 造成值被静默截断（例如 `NOTE=abc #123` 最终只剩 `abc`）。
+ *
+ * @param {string} value - 原始值
+ * @returns {string} 可直接写入 .env 的字面量
+ */
+function formatEnvValue(value) {
+  const v = value ?? '';
+  if (v === '') return '';
+  if (!/[\s#'"`]/.test(v)) return v;
+
+  // dotenv 只剥离最外层引号，并不处理反斜杠转义，
+  // 因此绝不能自行加反斜杠（否则 C:\path 会变成 C:\\path）。
+  // 正确做法是挑一个值里不存在的引号来包裹。
+  if (!v.includes('"')) return `"${v}"`;
+  if (!v.includes("'")) return `'${v}'`;
+
+  // 同时含单双引号：.env 格式无法无歧义表达，只能尽力而为并告警
+  console.warn('[WebUI] .env 值同时包含单双引号，可能无法原样还原:', v);
+  return `"${v}"`;
+}
+
+/**
+ * 解析 .env 中 `KEY=` 后面的原始字面量，还原为真实值
+ *
+ * 必须与 formatEnvValue 严格对称：只剥引号而不反转义，
+ * 会让含转义引号/反斜杠的值在界面上显示成一堆多余反斜杠，
+ * 保存后进一步叠加转义。
+ *
+ * @param {string} raw - `=` 之后的部分
+ * @returns {string} 还原后的值
+ */
+function parseEnvValue(raw) {
+  const v = (raw ?? '').trim();
+  if (v.length >= 2) {
+    const quoted = (v.startsWith('"') && v.endsWith('"'))
+      || (v.startsWith("'") && v.endsWith("'"));
+    if (quoted) return v.slice(1, -1);
+  }
+  return v;
+}
+
+/**
+ * 修改 agent.yaml 中 models.default 的取值
+ *
+ * 需要兼容两种等价写法（此前只支持列表写法，导致标量写法下保存被静默忽略）：
+ *   models:
+ *     default: "deepseek/deepseek-v4-flash"   # 标量
+ *     default:                                 # 列表（多模型轮询）
+ *       - "deepseek/deepseek-v4-flash"
+ *
+ * @param {string} text - 原始 YAML 文本
+ * @param {string} model - 新的模型标识
+ * @returns {string|null} 修改后的文本；未定位到 models.default 时返回 null
+ */
+function patchDefaultModel(text, model) {
+  // 列表写法：default: 换行后跟 "- xxx"，只替换首项（UI 为单选）
+  const listRe = /^([ \t]*default:[ \t]*\n[ \t]*-[ \t]*)([^\n]*)$/m;
+  if (listRe.test(text)) return text.replace(listRe, `$1"${model}"`);
+
+  // 标量写法：要求同一行确实有值，避免误吃空值行（如 default: 后面直接换行）
+  const scalarRe = /^([ \t]*default:[ \t]+)([^\n#]*\S)([ \t]*(?:#.*)?)$/m;
+  if (scalarRe.test(text)) return text.replace(scalarRe, `$1"${model}"$3`);
+
+  return null;
+}
 
 class WebUIService {
   constructor(config, agentInstance) {
@@ -25,36 +97,22 @@ class WebUIService {
     // ──────────────────────────────────────────
     this.app.get('/api/file', async (req, res) => {
       try {
-        const filePath = req.query.path;
-        if (!filePath) return res.status(400).json({ error: 'Path is required' });
+        const rawPath = req.query.path;
+        if (!rawPath) return res.status(400).json({ error: 'Path is required' });
 
-        const resolvedPath = path.resolve(filePath);
-        const homeDir = os.homedir();
-        const workspaceDir = path.resolve(process.cwd(), 'workspace');
-        const miotMcpDir = path.resolve(homeDir, '.miot-mcp');
+        // 统一使用 CoreAgent 的安全策略，避免多处路径校验规则漂移
+        const policy = this.agentInstance.agent?.getFilePolicy?.();
+        if (!policy) {
+          return res.status(503).json({ error: 'File policy not available' });
+        }
+        const verdict = policy.allowRead(rawPath);
 
-        const baseName = path.basename(resolvedPath).toLowerCase();
-        // 显式禁止访问任何敏感配置文件或凭据
-        const isSensitive = baseName.startsWith('.env') || 
-                            baseName.endsWith('.key') || 
-                            baseName.endsWith('.pem') || 
-                            baseName.endsWith('.db') || 
-                            resolvedPath.includes('/.git/') ||
-                            resolvedPath.includes('/config/');
-
-        const isAllowed = !isSensitive && (
-          resolvedPath.startsWith(workspaceDir) || 
-          resolvedPath.startsWith(miotMcpDir)
-        );
-
-        if (!isAllowed) {
-          console.warn(`[WebUI] Blocked unauthorized file access attempt: ${resolvedPath}`);
-          return res.status(403).json({ error: 'Forbidden' });
+        if (!verdict.ok) {
+          console.warn(`[WebUI] Blocked unauthorized file access attempt: ${verdict.resolvedPath} — ${verdict.reason}`);
+          return res.status(403).json({ error: 'Forbidden', reason: verdict.reason });
         }
 
-        console.log(`[WebUI] Serving file: ${resolvedPath}`);
-        console.log(`[WebUI] OS homedir: ${homeDir}, miotMcpDir: ${miotMcpDir}, isAllowed: ${isAllowed}`);
-        
+        const resolvedPath = verdict.resolvedPath;
         const ext = path.extname(resolvedPath).toLowerCase();
         let contentType = 'application/octet-stream';
         if (ext === '.png') contentType = 'image/png';
@@ -160,12 +218,20 @@ class WebUIService {
         if (req.body.name) content = patchScalar(content, 'name', req.body.name);
         if (req.body.workspace) content = patchScalar(content, 'workspace', req.body.workspace);
 
-        // ── Default model (array first item) ──
+        // ── Default model（兼容标量与列表写法）──
         if (req.body.model) {
-          const modelRe = /^([ \t]*default:\s*\n[ \t]*-\s*)(.+)$/m;
-          if (modelRe.test(content)) {
-            content = content.replace(modelRe, `$1${req.body.model}`);
+          const model = String(req.body.model);
+          if (/["'\n\r]/.test(model)) {
+            return res.status(400).json({ error: '模型名不能包含引号或换行符' });
           }
+          const patched = patchDefaultModel(content, model);
+          if (patched === null) {
+            // 关键：定位不到就报错。此前是静默跳过，界面显示"保存成功"但文件没变
+            return res.status(400).json({
+              error: '未能在 agent.yaml 中定位 models.default，请检查该配置项格式',
+            });
+          }
+          content = patched;
         }
 
         // ── Fallback model ──
@@ -249,9 +315,20 @@ class WebUIService {
         }
 
         await fs.writeFile(configPath, content, 'utf8');
-        await this.agentInstance.loadConfig();
 
-        res.json({ success: true });
+        // 模型相关配置可热重载；workspace / system_prompt / memory 目录
+        // 在启动时已固化为实例状态，必须重启才生效，此处如实回报。
+        const reload = this.agentInstance.reloadSubsystem
+          ? await this.agentInstance.reloadSubsystem('model')
+          : { reloadable: false, requiresRestart: ['agent'] };
+
+        const needsAgentRestart = Boolean(
+          req.body.name
+          || req.body.workspace
+          || req.body.systemPrompt !== undefined
+          || req.body.memory
+        );
+        res.json({ success: true, ...reload, requiresRestart: needsAgentRestart ? ['agent'] : [] });
       } catch (err) {
         res.status(500).json({ error: err.message });
       }
@@ -277,7 +354,13 @@ class WebUIService {
         parsed.cron.tasks = req.body.tasks || [];
         // 只更新 tasks 块，重新序列化（cron.yaml 没有特殊模板变量）
         await fs.writeFile(p, yaml.stringify(parsed), 'utf8');
-        res.json({ success: true });
+
+        // 写后立即重建调度器，避免「保存成功但需重启才生效」的一致性陷阱
+        if (this.agentInstance.reloadSubsystem) {
+          const reload = await this.agentInstance.reloadSubsystem('cron');
+          return res.json({ success: true, ...reload });
+        }
+        res.json({ success: true, reloadable: false, requiresRestart: ['cron'] });
       } catch (err) { res.status(500).json({ error: err.message }); }
     });
 
@@ -292,6 +375,8 @@ class WebUIService {
           enabled: parsed?.heartbeat?.enabled ?? true,
           interval: parsed?.heartbeat?.interval || '*/10 * * * *',
           checks: parsed?.heartbeat?.checks || [],
+          // AI 维护的动态巡检指令，必须回传给前端，否则保存时会被抹除
+          dynamic_prompt: parsed?.heartbeat?.dynamic_prompt || '',
         });
       } catch (err) { res.status(500).json({ error: err.message }); }
     });
@@ -304,8 +389,19 @@ class WebUIService {
         parsed.heartbeat.enabled = req.body.enabled;
         parsed.heartbeat.interval = req.body.interval;
         parsed.heartbeat.checks = req.body.checks || [];
+        // 保留 AI 维护的动态巡检指令（前端可能未提交该字段）
+        if (req.body.dynamic_prompt !== undefined) {
+          parsed.heartbeat.dynamic_prompt = req.body.dynamic_prompt;
+        }
+
         await fs.writeFile(p, yaml.stringify(parsed), 'utf8');
-        res.json({ success: true });
+
+        // 写后立即重载心跳配置（此前保存后必须重启才生效）
+        if (this.agentInstance.reloadSubsystem) {
+          const reload = await this.agentInstance.reloadSubsystem('heartbeat');
+          return res.json({ success: true, ...reload });
+        }
+        res.json({ success: true, reloadable: false, requiresRestart: ['heartbeat'] });
       } catch (err) { res.status(500).json({ error: err.message }); }
     });
 
@@ -331,7 +427,12 @@ class WebUIService {
           mcpServers[name] = rest;
         }
         await fs.writeFile(p, JSON.stringify({ mcpServers }, null, 2), 'utf8');
-        res.json({ success: true });
+
+        // MCP runtime 涉及子进程与外部连接，不支持热重载，如实告知前端
+        const reload = this.agentInstance.reloadSubsystem
+          ? await this.agentInstance.reloadSubsystem('mcp')
+          : { reloadable: false, requiresRestart: ['mcporter'] };
+        res.json({ success: true, ...reload });
       } catch (err) { res.status(500).json({ error: err.message }); }
     });
 
@@ -404,6 +505,39 @@ class WebUIService {
     });
 
     // ──────────────────────────────────────────
+    // 健康检查（供前端在重启后轮询恢复状态）
+    // ──────────────────────────────────────────
+    this.app.get('/api/health', (req, res) => {
+      res.json({
+        ok: true,
+        pid: process.pid,
+        uptime: Math.round(process.uptime()),
+        restarting: Boolean(this.agentInstance?._restarting),
+      });
+    });
+
+    // ──────────────────────────────────────────
+    // 重启 Agent
+    // ──────────────────────────────────────────
+    this.app.post('/api/restart', (req, res) => {
+      if (this.agentInstance?._restarting) {
+        return res.status(409).json({ success: false, error: '正在重启中，请稍候' });
+      }
+      if (typeof this.agentInstance?.restart !== 'function') {
+        return res.status(501).json({ success: false, error: '当前运行环境不支持重启' });
+      }
+
+      // 必须先返回响应再重启：stop() 会关闭本 HTTP 服务（含当前连接），
+      // 若同步等待重启完成，浏览器只会收到连接被中断的错误。
+      res.json({ success: true, restarting: true });
+      setTimeout(() => {
+        this.agentInstance.restart().then((r) => {
+          if (!r?.success) console.error('[WebUI] Restart failed:', r?.error);
+        }).catch((e) => console.error('[WebUI] Restart error:', e.message));
+      }, 400);
+    });
+
+    // ──────────────────────────────────────────
     // 读取 .env 变量
     // ──────────────────────────────────────────
     this.app.get('/api/env', async (req, res) => {
@@ -419,7 +553,7 @@ class WebUIService {
           const eqPos = line.indexOf('=');
           if (eqPos === -1) return { idx, type: 'comment', raw: line };
           const key = line.slice(0, eqPos).trim();
-          const value = line.slice(eqPos + 1).trim().replace(/^["']|["']$/g, '');
+          const value = parseEnvValue(line.slice(eqPos + 1));
           return { idx, type: 'var', key, value };
         });
         res.json({ lines });
@@ -435,10 +569,15 @@ class WebUIService {
         const { lines } = req.body;
         const content = lines.map(l => {
           if (l.type === 'comment') return l.raw;
-          return `${l.key}=${l.value}`;
+          return `${l.key}=${formatEnvValue(l.value)}`;
         }).join('\n');
         await fs.writeFile(envPath, content, 'utf8');
-        res.json({ success: true });
+
+        // 同步到 process.env 并刷新模型配置里的 apiKey，避免「界面已改但仍在用旧值」
+        const reload = this.agentInstance.reloadSubsystem
+          ? await this.agentInstance.reloadSubsystem('env')
+          : { reloadable: false, requiresRestart: ['feishu'] };
+        res.json({ success: true, ...reload });
       } catch (err) {
         res.status(500).json({ error: err.message });
       }
@@ -454,8 +593,8 @@ class WebUIService {
         const parsed = yaml.parse(content);
         const memDir = path.resolve(process.cwd(), parsed.memory?.directory || './memory');
         const filePath = path.join(memDir, req.params.filename);
-        // 安全检查：文件必须在 memory 目录内
-        if (!filePath.startsWith(memDir)) return res.status(403).json({ error: 'Forbidden' });
+        // 安全检查：文件必须严格位于 memory 目录内（path.relative 判定，杜绝前缀绕过）
+        if (!isInside(memDir, filePath)) return res.status(403).json({ error: 'Forbidden' });
         const fileContent = await fs.readFile(filePath, 'utf8').catch(() => '');
         res.json({ content: fileContent });
       } catch (err) {
@@ -471,7 +610,7 @@ class WebUIService {
         const parsed = yaml.parse(content);
         const memDir = path.resolve(process.cwd(), parsed.memory?.directory || './memory');
         const filePath = path.join(memDir, req.params.filename);
-        if (!filePath.startsWith(memDir)) return res.status(403).json({ error: 'Forbidden' });
+        if (!isInside(memDir, filePath)) return res.status(403).json({ error: 'Forbidden' });
         await fs.mkdir(memDir, { recursive: true });
         await fs.writeFile(filePath, req.body.content || '', 'utf8');
         res.json({ success: true });
@@ -555,21 +694,62 @@ class WebUIService {
     });
   }
 
-  async start() {
-    return new Promise((resolve) => {
-      this.server = this.app.listen(this.port, () => {
-        console.log(`[WebUI] Server running at http://localhost:${this.port}`);
-        resolve();
-      });
-    });
+  /**
+   * 启动 HTTP 服务
+   *
+   * 端口可能因为上一次进程的 socket 仍在 TIME_WAIT 而短暂不可用
+   * （软重启、`node --watch` 热重载时很常见），因此做有界重试，
+   * 避免一次性失败导致整个 Agent 退出。
+   *
+   * @param {number} attempts - 最大尝试次数
+   * @param {number} delayMs - 每次重试间隔
+   */
+  async start(attempts = 3, delayMs = 600) {
+    let lastError = null;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        await new Promise((resolve, reject) => {
+          const server = this.app.listen(this.port, () => {
+            console.log(`[WebUI] Server running at http://localhost:${this.port}`);
+            resolve();
+          });
+          server.on('error', (err) => {
+            server.close(() => {});
+            reject(err);
+          });
+          this.server = server;
+        });
+        return;
+      } catch (err) {
+        lastError = err;
+        this.server = null;
+        if (err.code !== 'EADDRINUSE' || i === attempts - 1) break;
+        console.warn(`[WebUI] Port ${this.port} busy (${err.code}), retry ${i + 1}/${attempts - 1} in ${delayMs}ms...`);
+        await new Promise(r => setTimeout(r, delayMs));
+      }
+    }
+    console.error(`[WebUI] Listen error on port ${this.port}: ${lastError?.message}`);
+    throw lastError;
   }
 
   async stop() {
-    if (this.server) {
-      this.server.close();
-      console.log(`[WebUI] Server stopped`);
-    }
+    if (!this.server) return;
+    const server = this.server;
+    this.server = null;
+
+    // 必须等到 close 回调：软重启会立刻在原端口重新 listen，
+    // 只调用 close() 而不等待会导致新服务拿到 EADDRINUSE。
+    await new Promise((resolve) => {
+      server.close(() => resolve());
+      // keep-alive 与 SSE 长连接会阻止 close 回调，需要主动断开
+      if (typeof server.closeAllConnections === 'function') {
+        server.closeAllConnections();
+      }
+      setTimeout(resolve, 3000); // 兜底，避免极端情况永久挂起
+    });
+    console.log('[WebUI] Server stopped');
   }
 }
 
 export default WebUIService;
+export { formatEnvValue, parseEnvValue, patchDefaultModel };

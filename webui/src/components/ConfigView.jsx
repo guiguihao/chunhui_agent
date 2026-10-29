@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Save, RefreshCw, Plus, Trash2, ChevronDown, ChevronUp, Database, Cpu, Server, FileText, ArrowLeft, Eye, EyeOff, Key } from 'lucide-react'
+import { useLanguage } from './LanguageContext'
 import './ConfigView.css'
 
 const DEFAULT_PROVIDER = {
@@ -11,6 +12,7 @@ const DEFAULT_PROVIDER = {
 
 // ── Model selector built from providers list ──
 function ModelSelect({ name, value, providers = [], onChange, allowEmpty = false }) {
+  const { t } = useLanguage()
   // Build options: group by provider
   const options = []
   for (const p of providers) {
@@ -31,13 +33,13 @@ function ModelSelect({ name, value, providers = [], onChange, allowEmpty = false
         onChange={onChange}
         className="form-input form-select"
       >
-        {allowEmpty && <option value="">— None —</option>}
+        {allowEmpty && <option value="">— {t('cfg_fallback_model')} —</option>}
         {isCustom && <option value={value}>{value}</option>}
         {options.map(o => (
           <option key={o.value} value={o.value}>{o.label}</option>
         ))}
         {options.length === 0 && !isCustom && (
-          <option disabled value="">No providers configured</option>
+          <option disabled value="">{t('cfg_providers_empty')}</option>
         )}
       </select>
     </div>
@@ -53,6 +55,7 @@ const MEMORY_FILES = [
 ]
 
 export default function ConfigView() {
+  const { t } = useLanguage()
   const [activeTab, setActiveTab] = useState('agent')
   const [config, setConfig] = useState(null)
   const [saving, setSaving] = useState(false)
@@ -76,8 +79,7 @@ export default function ConfigView() {
   const openMemFile = async (fileKey) => {
     if (!config) return
     const filename = config.memory[fileKey]
-    const meta = MEMORY_FILES.find(f => f.key === fileKey)
-    setMemEditor({ key: fileKey, filename, label: meta.label })
+    setMemEditor({ key: fileKey, filename, label: t(`mem_${fileKey}`) })
     setMemContent('')
     setMemLoading(true)
     setMemSaveMsg('')
@@ -103,9 +105,9 @@ export default function ConfigView() {
         body: JSON.stringify({ content: memContent })
       })
       const data = await res.json()
-      setMemSaveMsg(data.success ? '✓ Saved' : `Error: ${data.error}`)
+      setMemSaveMsg(data.success ? t('save_ok') : `${t('save_err')}${data.error}`)
     } catch (err) {
-      setMemSaveMsg(`Error: ${err.message}`)
+      setMemSaveMsg(`${t('save_err')}${err.message}`)
     } finally {
       setMemSaving(false)
       setTimeout(() => setMemSaveMsg(''), 3000)
@@ -143,12 +145,20 @@ export default function ConfigView() {
         body: JSON.stringify({ lines: envLines })
       })
       const data = await res.json()
-      setEnvSaveMsg(data.success ? '✓ Saved' : `Error: ${data.error}`)
+      if (!data.success) {
+        setEnvSaveMsg(`${t('save_err')}${data.error}`)
+      } else if (Array.isArray(data.requiresRestart) && data.requiresRestart.length > 0) {
+        // 后端会如实返回无法热重载的模块（如飞书、mcporter），
+        // 只提示「保存成功」会让用户误以为立即生效
+        setEnvSaveMsg(t('save_ok_restart', { modules: data.requiresRestart.join('、') }))
+      } else {
+        setEnvSaveMsg(t('save_ok'))
+      }
     } catch (err) {
-      setEnvSaveMsg(`Error: ${err.message}`)
+      setEnvSaveMsg(`${t('save_err')}${err.message}`)
     } finally {
       setEnvSaving(false)
-      setTimeout(() => setEnvSaveMsg(''), 3000)
+      setTimeout(() => setEnvSaveMsg(''), 5000)
     }
   }
 
@@ -223,9 +233,9 @@ export default function ConfigView() {
         body: JSON.stringify(config)
       })
       const data = await res.json()
-      setSaveMsg(data.success ? '✓ Saved' : `Error: ${data.error}`)
+      setSaveMsg(data.success ? t('save_ok') : `${t('save_err')}${data.error}`)
     } catch (err) {
-      setSaveMsg(`Error: ${err.message}`)
+      setSaveMsg(`${t('save_err')}${err.message}`)
     } finally {
       setSaving(false)
       setTimeout(() => setSaveMsg(''), 3000)
@@ -234,7 +244,7 @@ export default function ConfigView() {
 
   if (!config) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '60vh', color: 'var(--text-muted)' }}>
-      <RefreshCw size={20} className="spin" style={{ marginRight: 10 }} /> Loading configuration...
+      <RefreshCw size={20} className="spin" style={{ marginRight: 10 }} /> {t('cfg_loading_config')}
     </div>
   )
 
@@ -242,15 +252,15 @@ export default function ConfigView() {
     <div className="config-view fade-in">
       <header className="view-header flex-between">
         <div>
-          <h1 className="view-title">Configuration</h1>
-          <p className="view-subtitle">Manage agent settings, memory and model providers</p>
+          <h1 className="view-title">{t('cfg_title')}</h1>
+          <p className="view-subtitle">{t('cfg_subtitle')}</p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          {saveMsg && <span className={`save-msg ${saveMsg.startsWith('✓') ? 'ok' : 'err'}`}>{saveMsg}</span>}
+          {saveMsg && <span className={`save-msg ${saveMsg.startsWith('✓') || saveMsg.includes('成功') ? 'ok' : 'err'}`}>{saveMsg}</span>}
           {activeTab !== 'memory' && activeTab !== 'env' && (
             <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
               {saving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}
-              {saving ? 'Saving...' : 'Save Changes'}
+              {saving ? t('btn_saving') : t('btn_save_changes')}
             </button>
           )}
         </div>
@@ -259,16 +269,16 @@ export default function ConfigView() {
       {/* Tabs */}
       <div className="config-tabs">
         <button className={`config-tab ${activeTab === 'agent' ? 'active' : ''}`} onClick={() => { setActiveTab('agent'); setMemEditor(null) }}>
-          <Cpu size={16} /> Agent
+          <Cpu size={16} /> {t('cfg_tab_agent')}
         </button>
         <button className={`config-tab ${activeTab === 'memory' ? 'active' : ''}`} onClick={() => { setActiveTab('memory'); setMemEditor(null) }}>
-          <Database size={16} /> Memory
+          <Database size={16} /> {t('cfg_tab_memory')}
         </button>
         <button className={`config-tab ${activeTab === 'providers' ? 'active' : ''}`} onClick={() => { setActiveTab('providers'); setMemEditor(null) }}>
-          <Server size={16} /> Model Providers
+          <Server size={16} /> {t('cfg_tab_providers')}
         </button>
         <button className={`config-tab ${activeTab === 'env' ? 'active' : ''}`} onClick={() => { setActiveTab('env'); setMemEditor(null); loadEnv() }}>
-          <Key size={16} /> Environment
+          <Key size={16} /> {t('cfg_tab_env')}
         </button>
       </div>
 
@@ -276,30 +286,30 @@ export default function ConfigView() {
       {activeTab === 'agent' && (
         <div className="config-grid single-col fade-in">
           <div className="config-card glass-panel">
-            <h2 className="card-title">Agent Parameters</h2>
+            <h2 className="card-title">{t('cfg_agent_title')}</h2>
             <div className="form-row">
               <div className="form-group flex-1">
-                <label className="form-label">Agent Name</label>
+                <label className="form-label">{t('cfg_agent_name')}</label>
                 <input type="text" name="name" value={config.name} onChange={handleAgentChange} className="form-input" />
               </div>
               <div className="form-group flex-1">
-                <label className="form-label">Workspace Path</label>
+                <label className="form-label">{t('cfg_agent_workspace')}</label>
                 <input type="text" name="workspace" value={config.workspace} onChange={handleAgentChange} className="form-input" disabled />
               </div>
             </div>
             <div className="form-row">
               <div className="form-group flex-1">
-                <label className="form-label">Default Model</label>
+                <label className="form-label">{t('cfg_default_model')}</label>
                 <ModelSelect name="model" value={config.model} providers={config.providers} onChange={handleAgentChange} />
-                <span className="form-hint">Format: provider_name/model_id</span>
+                <span className="form-hint">{t('cfg_model_hint')}</span>
               </div>
               <div className="form-group flex-1">
-                <label className="form-label">Fallback Model</label>
+                <label className="form-label">{t('cfg_fallback_model')}</label>
                 <ModelSelect name="fallback" value={config.fallback} providers={config.providers} onChange={handleAgentChange} allowEmpty />
               </div>
             </div>
             <div className="form-group">
-              <label className="form-label">System Prompt</label>
+              <label className="form-label">{t('cfg_system_prompt')}</label>
               <textarea name="systemPrompt" value={config.systemPrompt} onChange={handleAgentChange} className="form-input form-textarea" rows={12} />
             </div>
           </div>
@@ -310,9 +320,9 @@ export default function ConfigView() {
       {activeTab === 'memory' && !memEditor && (
         <div className="config-grid single-col fade-in">
           <div className="config-card glass-panel">
-            <h2 className="card-title">Memory Files</h2>
+            <h2 className="card-title">{t('cfg_mem_title')}</h2>
             <div className="mem-dir-row">
-              <span className="form-hint">Directory:</span>
+              <span className="form-hint">{t('cfg_mem_dir')}</span>
               <code className="mem-dir-path">{config.memory.directory}</code>
             </div>
             <div className="mem-file-list">
@@ -320,9 +330,9 @@ export default function ConfigView() {
                 <div key={f.key} className="mem-file-item" onClick={() => openMemFile(f.key)}>
                   <div className="mem-file-icon"><FileText size={18} /></div>
                   <div className="mem-file-info">
-                    <span className="mem-file-label">{f.label}</span>
+                    <span className="mem-file-label">{t(`mem_${f.key}`)}</span>
                     <span className="mem-file-path">{config.memory[f.key]}</span>
-                    <span className="mem-file-desc">{f.desc}</span>
+                    <span className="mem-file-desc">{t(`mem_${f.key}_desc`)}</span>
                   </div>
                   <ChevronDown size={16} style={{ color: 'var(--text-muted)', transform: 'rotate(-90deg)' }} />
                 </div>
@@ -338,7 +348,7 @@ export default function ConfigView() {
           <div className="config-card glass-panel">
             <div className="flex-between" style={{ marginBottom: 20 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <button className="icon-btn" onClick={() => setMemEditor(null)} title="Back">
+                <button className="icon-btn" onClick={() => setMemEditor(null)} title={t('btn_back')}>
                   <ArrowLeft size={18} />
                 </button>
                 <div>
@@ -349,10 +359,10 @@ export default function ConfigView() {
                 </div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                {memSaveMsg && <span className={`save-msg ${memSaveMsg.startsWith('✓') ? 'ok' : 'err'}`}>{memSaveMsg}</span>}
+                {memSaveMsg && <span className={`save-msg ${memSaveMsg.startsWith('✓') || memSaveMsg.includes('成功') ? 'ok' : 'err'}`}>{memSaveMsg}</span>}
                 <button className="btn btn-primary" onClick={saveMemFile} disabled={memSaving || memLoading}>
                   {memSaving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}
-                  {memSaving ? 'Saving...' : 'Save'}
+                  {memSaving ? t('btn_saving') : t('btn_save')}
                 </button>
               </div>
             </div>
@@ -367,7 +377,7 @@ export default function ConfigView() {
                 value={memContent}
                 onChange={e => setMemContent(e.target.value)}
                 rows={20}
-                placeholder={`No content yet in ${memEditor.filename}...`}
+                placeholder={t('cfg_mem_empty', { filename: memEditor.filename })}
               />
             )}
           </div>
@@ -379,15 +389,15 @@ export default function ConfigView() {
         <div className="config-grid single-col fade-in">
           <div className="config-card glass-panel">
             <div className="flex-between" style={{ marginBottom: 24 }}>
-              <h2 className="card-title" style={{ marginBottom: 0, borderBottom: 'none', paddingBottom: 0 }}>Model Providers</h2>
+              <h2 className="card-title" style={{ marginBottom: 0, borderBottom: 'none', paddingBottom: 0 }}>{t('cfg_providers_title')}</h2>
               <button className="btn btn-primary" style={{ padding: '8px 16px', fontSize: 13 }} onClick={addProvider}>
-                <Plus size={14} /> Add Provider
+                <Plus size={14} /> {t('btn_add_provider')}
               </button>
             </div>
 
             {(config.providers || []).length === 0 && (
               <div style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '32px 0' }}>
-                No providers configured. Click "Add Provider" to start.
+                {t('cfg_providers_empty')}
               </div>
             )}
 
@@ -395,7 +405,7 @@ export default function ConfigView() {
               <div key={pIdx} className="provider-card">
                 <div className="provider-header" onClick={() => setExpandedProvider(expandedProvider === pIdx ? null : pIdx)}>
                   <div>
-                    <span className="provider-name">{provider.name || <em style={{ opacity: 0.4 }}>Unnamed Provider</em>}</span>
+                    <span className="provider-name">{provider.name || <em style={{ opacity: 0.4 }}>{t('cfg_provider_unnamed')}</em>}</span>
                     <span className="provider-meta">{provider.base_url || ''}</span>
                   </div>
                   <div style={{ display: 'flex', gap: 8 }}>
@@ -410,23 +420,23 @@ export default function ConfigView() {
                   <div className="provider-body">
                     <div className="form-row">
                       <div className="form-group flex-1">
-                        <label className="form-label">Provider Name</label>
+                        <label className="form-label">{t('cfg_provider_name')}</label>
                         <input type="text" value={provider.name} onChange={e => updateProvider(pIdx, 'name', e.target.value)} className="form-input" placeholder="e.g. openai" />
                       </div>
                       <div className="form-group flex-1">
-                        <label className="form-label">API Key Env</label>
+                        <label className="form-label">{t('cfg_provider_api_key_env')}</label>
                         <input type="text" value={provider.api_key_env} onChange={e => updateProvider(pIdx, 'api_key_env', e.target.value)} className="form-input" placeholder="e.g. OPENAI_API_KEY" />
                       </div>
                     </div>
                     <div className="form-group">
-                      <label className="form-label">Base URL</label>
+                      <label className="form-label">{t('cfg_provider_base_url')}</label>
                       <input type="text" value={provider.base_url} onChange={e => updateProvider(pIdx, 'base_url', e.target.value)} className="form-input" placeholder="https://api.openai.com/v1" />
                     </div>
 
                     <div className="models-section">
                       <div className="flex-between" style={{ marginBottom: 12 }}>
-                        <label className="form-label" style={{ margin: 0 }}>Models</label>
-                        <button className="btn-text" onClick={() => addModel(pIdx)}>+ Add Model</button>
+                        <label className="form-label" style={{ margin: 0 }}>{t('cfg_provider_models')}</label>
+                        <button className="btn-text" onClick={() => addModel(pIdx)}>{t('btn_add_model')}</button>
                       </div>
                       {(provider.models || []).map((model, mIdx) => (
                         <div key={mIdx} className="model-row">
@@ -435,16 +445,16 @@ export default function ConfigView() {
                             value={model.id || ''}
                             onChange={e => updateProviderModel(pIdx, mIdx, 'id', e.target.value)}
                             className="form-input"
-                            placeholder="model-id"
+                            placeholder={t('cfg_model_id')}
                             style={{ flex: 1 }}
                           />
                           <label className="model-toggle">
                             <input type="checkbox" checked={!!model.thinking} onChange={e => updateProviderModel(pIdx, mIdx, 'thinking', e.target.checked)} />
-                            Thinking
+                            {t('cfg_model_thinking')}
                           </label>
                           <label className="model-toggle">
                             <input type="checkbox" checked={!!model.stream} onChange={e => updateProviderModel(pIdx, mIdx, 'stream', e.target.checked)} />
-                            Stream
+                            {t('cfg_model_stream')}
                           </label>
                           <button className="icon-btn danger" onClick={() => removeModel(pIdx, mIdx)}>
                             <Trash2 size={14} />
@@ -465,19 +475,19 @@ export default function ConfigView() {
         <div className="config-grid single-col fade-in">
           <div className="config-card glass-panel">
             <div className="flex-between" style={{ marginBottom: 24 }}>
-              <h2 className="card-title" style={{ marginBottom: 0, borderBottom: 'none', paddingBottom: 0 }}>Environment Variables</h2>
+              <h2 className="card-title" style={{ marginBottom: 0, borderBottom: 'none', paddingBottom: 0 }}>{t('cfg_env_title')}</h2>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                {envSaveMsg && <span className={`save-msg ${envSaveMsg.startsWith('✓') ? 'ok' : 'err'}`}>{envSaveMsg}</span>}
-                <button className="btn-text" onClick={addEnvVar}><Plus size={14} /> Add Variable</button>
+                {envSaveMsg && <span className={`save-msg ${envSaveMsg.startsWith('✓') || envSaveMsg.includes('成功') ? 'ok' : 'err'}`}>{envSaveMsg}</span>}
+                <button className="btn-text" onClick={addEnvVar}><Plus size={14} /> {t('btn_add_var')}</button>
                 <button className="btn btn-primary" style={{ padding: '8px 16px', fontSize: 13 }} onClick={saveEnv} disabled={envSaving}>
                   {envSaving ? <RefreshCw className="spin" size={16} /> : <Save size={16} />}
-                  {envSaving ? 'Saving...' : 'Save .env'}
+                  {envSaving ? t('btn_saving') : t('btn_save_env')}
                 </button>
               </div>
             </div>
 
             {envLoading ? (
-              <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-muted)' }}><RefreshCw size={20} className="spin" /></div>
+              <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-muted)' }}><RefreshCw size={20} className="spin" /> {t('cfg_env_loading')}</div>
             ) : (
               <div className="env-list">
                 {envLines.map((line, idx) => {
@@ -497,7 +507,7 @@ export default function ConfigView() {
                       <input
                         className="form-input env-key-input"
                         value={line.key}
-                        placeholder="KEY"
+                        placeholder={t('cfg_env_key')}
                         onChange={e => updateEnvLine(idx, 'key', e.target.value)}
                       />
                       <span className="env-eq">=</span>
@@ -506,7 +516,7 @@ export default function ConfigView() {
                           className="form-input env-value-input"
                           type={hidden ? 'password' : 'text'}
                           value={line.value}
-                          placeholder="value"
+                          placeholder={t('cfg_env_val')}
                           onChange={e => updateEnvLine(idx, 'value', e.target.value)}
                         />
                         {sensitive && (
