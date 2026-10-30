@@ -5,6 +5,7 @@
  */
 import fs from 'fs/promises';
 import path from 'path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
 import { getAllTools } from './tools/registry.js';
@@ -16,7 +17,22 @@ import { trimHistory, normalizeMessages, cleanHistory } from './session/history.
 
 dotenv.config();
 
-const DEFAULT_SYSTEM_PROMPT = `You are a helpful AI assistant named "{name}".`;
+/**
+ * 标记「当前是否已在某个 decide 调用内部」
+ *
+ * 技能执行时会再次调用 agent.decide()（见 skill.js），若入口无条件按 sessionId
+ * 加锁，内层调用会等待自己 → 死锁。用 AsyncLocalStorage 识别重入，内层直接执行。
+ */
+const decideContext = new AsyncLocalStorage();
+
+// ── 会话压缩预算 ──
+// 全项目没有 token 估算，这里统一用字符数近似（中文约 1.5 字符/token）。
+// 阈值集中在此，别再散落成调用处的魔法数字。
+const MAX_HISTORY_CHARS = 30000;        // 历史超过该字符数即触发自动压缩
+const MAX_COMPRESS_INPUT_CHARS = 20000; // 单次摘要请求的输入上限（历史可能已远超模型窗口）
+const AUTO_COMPRESS_KEEP = 3;           // 自动压缩时保留的最近消息条数
+
+const DEFAULT_SYSTEM_PROMPT = `You are a helpful AI assistant named "{name}". If a tool keeps failing or returns nothing new after two attempts, stop retrying and report the situation to the user instead.`;
 
 /**
  * README 的精简摘要，替代全文注入系统提示。
@@ -107,6 +123,8 @@ class CoreAgent {
     }
 
     this._sessions = {};
+    // sessionId → Promise 链：同一会话的 decide 串行执行，避免并发写回互相覆盖
+    this._sessionQueues = new Map();
     this._memoryService = null;
     this._skillService = null;   // 技能服务
     this._workspace = '';          // 工作目录
@@ -178,6 +196,13 @@ class CoreAgent {
   reloadModelConfig(newModelConfig = {}) {
     if (newModelConfig.name) this.name = newModelConfig.name;
     if (newModelConfig.systemPrompt) this.systemPrompt = newModelConfig.systemPrompt;
+    // 轮数/上下文预算也支持热更新，改配置后不必重启进程
+    if (Number(newModelConfig.maxToolIterations) > 0) {
+      this.maxToolIterations = Number(newModelConfig.maxToolIterations);
+    }
+    if (Number(newModelConfig.maxContextTurns) > 0) {
+      this.maxContextTurns = Number(newModelConfig.maxContextTurns);
+    }
     if (newModelConfig.primaryConfigs && newModelConfig.primaryConfigs.length > 0) {
       this.primaryConfigs = newModelConfig.primaryConfigs;
       this.currentPrimaryIndex = 0;
@@ -322,6 +347,38 @@ class CoreAgent {
   }
 
   /**
+   * 在同一 sessionId 上串行执行一段逻辑
+   *
+   * 为什么需要：decide() 结束时会把本轮 workingHistory 整体写回
+   * `_sessions[sessionId]`。若同一会话有两个并发回合（同一巡检项的重叠 tick、
+   * 用户消息与告警写入撞在一起），后写的会覆盖先写的 —— 表现为消息凭空消失。
+   *
+   * 不同会话之间互不阻塞（cron 任务 / 心跳各占独立会话），所以并发任务本身不受影响。
+   */
+  async runExclusive(sessionId, fn) {
+    // 仅当重入的是「同一个会话」时直通（同会话递归会自锁）；
+    // 不同会话的嵌套调用照常排队：否则外层非 default 会话忙时，
+    // 技能内层的 default 回合会与真正并发的 default 回合互相覆盖历史
+    if (decideContext.getStore()?.sessionId === sessionId) return fn();
+
+    const prev = this._sessionQueues.get(sessionId) || Promise.resolve();
+    let release;
+    const current = new Promise((resolve) => { release = resolve; });
+    const chained = prev.then(() => current);
+    this._sessionQueues.set(sessionId, chained);
+
+    await prev.catch(() => { });
+    try {
+      return await decideContext.run({ sessionId }, fn);
+    } finally {
+      release();
+      if (this._sessionQueues.get(sessionId) === chained) {
+        this._sessionQueues.delete(sessionId);
+      }
+    }
+  }
+
+  /**
    * 核心对话方法
    * @param {string} prompt - 用户消息
    * @param {object} options - 可选参数
@@ -329,6 +386,26 @@ class CoreAgent {
    */
   async decide(prompt, options = {}) {
     const sessionId = options.sessionId || 'default';
+    return this.runExclusive(sessionId, () => this._decideInner(prompt, options));
+  }
+
+  /**
+   * decide 的实际实现（调用方应通过 decide() 进入，以获得会话级串行保护）
+   */
+  async _decideInner(prompt, options = {}) {
+    const sessionId = options.sessionId || 'default';
+
+    // 本轮使用的模型与客户端一律用局部变量（声明在指令拦截之前，
+    // /compress 等旁路也要用本轮的 client/model，而不是可能被并发回合改写的实例字段）
+    let turnClient = this.client;
+    let turnModel = this.model;
+    let turnThinking = this.thinking;
+    let turnStream = this.stream;
+
+    // 每轮可覆盖工具轮数上限：用户对话给宽预算，定时任务/心跳这类后台执行给紧预算
+    const maxIterations = Number(options.maxToolIterations) > 0
+      ? Number(options.maxToolIterations)
+      : this.maxToolIterations;
 
     // ── 指令拦截 ──
     const trimmed = prompt.trim();
@@ -337,7 +414,7 @@ class CoreAgent {
       return { ...result, command: 'new' };
     }
     if (trimmed === '/compress' || trimmed === '/压缩') {
-      const result = await this.compressSession(sessionId);
+      const result = await this.compressSession(sessionId, turnClient, turnModel);
       return { ...result, command: 'compress' };
     }
     if (trimmed === '/context' || trimmed === '/上下文') {
@@ -345,22 +422,31 @@ class CoreAgent {
       return { ...result, command: 'context' };
     }
 
+    // 以前直接写 this.model / this.client，多个回合并发时（cron 任务 + 心跳 + 用户对话）
+    // 后开始的回合会覆盖掉先开始回合的 client，导致「A 回合用 B 回合的 baseURL/apiKey/model」
+    // 发出请求。实例字段仍然同步更新，供日志与会话摘要等只读场景使用。
+
     // 轮询选择当前主模型（提前初始化，保证在此轮的任何步骤包括自动压缩都能使用到最新的 client/model）
     if (this.primaryConfigs && this.primaryConfigs.length > 0) {
       const pConfig = this.primaryConfigs[this.currentPrimaryIndex];
       this.currentPrimaryIndex = (this.currentPrimaryIndex + 1) % this.primaryConfigs.length;
 
-      this.model = pConfig.model;
-      this.thinking = pConfig.thinking || false;
-      this.stream = pConfig.stream || false;
+      turnModel = pConfig.model;
+      turnThinking = pConfig.thinking || false;
+      turnStream = pConfig.stream || false;
 
-      this.client = new OpenAI({
+      turnClient = new OpenAI({
         baseURL: pConfig.baseUrl,
         apiKey: pConfig.apiKey,
         timeout: 60000,
         defaultHeaders: { 'User-Agent': 'curl/8.7.1' },
       });
-      console.log(`[CoreAgent] Round-robin selected primary model: ${this.model}`);
+
+      this.model = turnModel;
+      this.thinking = turnThinking;
+      this.stream = turnStream;
+      this.client = turnClient;
+      console.log(`[CoreAgent] Round-robin selected primary model: ${turnModel}`);
     }
 
     if (!this._sessions[sessionId]) {
@@ -376,46 +462,55 @@ class CoreAgent {
     const cleanedHistory = this._cleanHistory(this._trimHistory(historyCopy, maxLen));
     let workingHistory = cleanedHistory;
 
-    // 自动会话压缩：如果历史会话条数超过 5 条，仅压缩3条之前的旧消息，最新3条原样保留
-    if (workingHistory.length > 20) {
-      const olderMessages = workingHistory.slice(0, workingHistory.length - 3);
-      const latestFive = workingHistory.slice(-3);
+    // 自动会话压缩：按「条数 + 字符数」双重预算触发
+    // 只看条数在「少而长」的会话里完全失效（3 条各 2 万字同样会爆上下文）
+    const historyChars = workingHistory.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+    if (workingHistory.length > 20 || historyChars > MAX_HISTORY_CHARS) {
+      // 按回合边界切：切点落在 tool 结果上时回退到其 assistant(tool_calls)，
+      // 否则残缺序列会被 _normalizeMessages 整段丢弃，"保留的最新消息"直接消失
+      let keepFrom = Math.max(0, workingHistory.length - AUTO_COMPRESS_KEEP);
+      // 历史很短但单条极大时（如 2 条各 3 万字），至少留出可压缩的部分；
+      // 最后一条是本轮用户输入，必须原样保留
+      if (keepFrom === 0 && workingHistory.length > 1) {
+        keepFrom = workingHistory.length - 1;
+      }
+      while (keepFrom > 0 && workingHistory[keepFrom].role === 'tool') {
+        keepFrom--;
+      }
+      const olderMessages = workingHistory.slice(0, keepFrom);
+      const latestMessages = workingHistory.slice(keepFrom);
 
-      console.log(`[CoreAgent] workingHistory.length 为 ${workingHistory.length} (> 3)，自动压缩前 ${olderMessages.length} 条旧消息，保留最新 3 条...`);
+      console.log(`[CoreAgent] 自动压缩触发：${workingHistory.length} 条 / ${historyChars} 字符，压缩 ${olderMessages.length} 条旧消息，保留最新 ${latestMessages.length} 条...`);
 
-      // 将旧消息格式化为文本供 LLM 总结
-      const historyText = olderMessages.map(msg => {
-        const roleLabel = msg.role === 'user' ? '用户' :
-          msg.role === 'assistant' ? 'AI' :
-            msg.role === 'tool' ? '工具结果' :
-              msg.role === 'system' ? '系统' : msg.role;
-        let text = `[${roleLabel}]: ${msg.content || ''}`;
-        if (msg.tool_calls) {
-          text += ` (调用了工具: ${msg.tool_calls.map(tc => tc.function?.name).join(', ')})`;
+      if (olderMessages.length > 0) {
+        try {
+          const summary = await this._summarizeMessages(olderMessages, turnClient, turnModel);
+
+          // 用 user 角色承载摘要（多条 system 在部分兼容实现里只取第一条），
+          // 并打上 compressed 标记：下一轮据此把「旧摘要 + 新内容」合并更新，
+          // 而不是把摘要再摘要一遍（细节逐轮衰减）
+          const prevSummary = olderMessages.find(m => m.compressed)?.content;
+          const summaryMsg = {
+            role: 'user',
+            content: prevSummary
+              ? `[对话摘要·更新] ${summary}\n（已合并此前摘要）`
+              : `[对话摘要] ${summary}`,
+            compressed: true,
+          };
+
+          workingHistory = [summaryMsg, ...latestMessages];
+          console.log(`[CoreAgent] 自动压缩完成：${olderMessages.length} 条旧消息 → 摘要，保留最新 ${latestMessages.length} 条，workingHistory.length = ${workingHistory.length}`);
+        } catch (compressErr) {
+          console.error(`[CoreAgent] 自动压缩失败: ${compressErr.message}，退化为硬截断`);
+          // 压缩失败的主因就是历史过长，原样继续会让主请求同样超窗失败；
+          // 这里退化保留最近一半（至少 6 条），并用一条占位说明补齐语义
+          const keepRecent = Math.max(6, Math.floor(workingHistory.length / 2));
+          const dropped = workingHistory.splice(0, workingHistory.length - keepRecent);
+          workingHistory.unshift({
+            role: 'user',
+            content: `[系统] 早期 ${dropped.length} 条消息因上下文超限已省略，压缩摘要生成失败。`,
+          });
         }
-        return text;
-      }).join('\n');
-
-      try {
-        const summaryResp = await this.client.chat.completions.create({
-          model: this.model,
-          messages: [
-            { role: 'system', content: '你是一个对话摘要助手，擅长提炼关键信息。' },
-            { role: 'user', content: `请将以下对话历史压缩为一段简洁的摘要，保留关键信息、决策和结果，去除冗余细节。用中文输出，不超过200字。\n\n${historyText}` },
-          ],
-          temperature: 0.3,
-          max_tokens: 300,
-        });
-
-        const summary = summaryResp.choices[0].message.content || '（历史摘要生成失败）';
-        const summaryMsg = { role: 'system', content: `以下是之前对话的摘要：\n${summary}` };
-
-        // 重新拼接：[摘要] + [最新5条]
-        workingHistory = [summaryMsg, ...latestFive];
-        console.log(`[CoreAgent] 自动压缩完成：${olderMessages.length} 条旧消息 → 摘要，保留最新 5 条，workingHistory.length = ${workingHistory.length}`);
-      } catch (compressErr) {
-        console.error(`[CoreAgent] 自动压缩失败: ${compressErr.message}，跳过压缩继续执行`);
-        // 压缩失败时保持原 workingHistory 不变，不影响本轮正常运行
       }
     }
 
@@ -464,17 +559,24 @@ class CoreAgent {
     const executedToolCalls = new Map();
 
     try {
-    for (let i = 0; i < this.maxToolIterations; i++) {
+    for (let i = 0; i < maxIterations; i++) {
+      // 最后一轮不再提供工具：否则模型会一直调工具直到轮数耗尽，
+      // finalResponse 始终为空 → 用户只看到「无响应」，且不知道是轮数用完了
+      const isLastIteration = i === maxIterations - 1;
+      if (isLastIteration && tools.length > 0) {
+        console.log(`[CoreAgent] 已达最大工具轮数 ${maxIterations}，本轮不再提供工具，强制收敛出结论`);
+      }
+
       const requestOptions = {
-        model: this.model,
+        model: turnModel,
         messages: messages,
-        tools: tools.length > 0 ? tools : undefined,
+        tools: tools.length > 0 && !isLastIteration ? tools : undefined,
         temperature: 0.7,
         max_tokens: 4096, // 显式设置最大输出，防止某些 API 在输入过长时自动计算产生负值
       };
 
       // 思考模式：构建 reasoning 参数
-      if (this.thinking) {
+      if (turnThinking) {
         requestOptions.temperature = 1; // 思考模式要求 temperature=1
         // OpenAI extended thinking: 通过 reasoning_effort 参数
         if (options.reasoningEffort) {
@@ -485,7 +587,7 @@ class CoreAgent {
       // 根据是否流式选择不同的调用方式
       const onChunk = options.onChunk || null;
       const onStream = options.onStream || null;
-      const isStream = options.stream !== undefined ? options.stream : this.stream;
+      const isStream = options.stream !== undefined ? options.stream : turnStream;
 
       if (isStream) {
         requestOptions.stream = true;
@@ -494,8 +596,8 @@ class CoreAgent {
       let choice;
       try {
         choice = isStream
-          ? await this._handleStreamRequest(requestOptions, onChunk, onStream)
-          : await this._handleNormalRequest(requestOptions);
+          ? await this._handleStreamRequest(requestOptions, onChunk, onStream, turnClient)
+          : await this._handleNormalRequest(requestOptions, turnClient);
 
         // 如果不是流式，手动把完整结果触发一次 onStream
         if (!isStream && onStream) {
@@ -508,7 +610,7 @@ class CoreAgent {
         }
       } catch (error) {
         if (this.fallbackConfigs && this.fallbackConfigs.length > 0) {
-          console.warn(`[CoreAgent] Primary model (${this.model}) failed: ${error.message}. Trying fallbacks.`);
+          console.warn(`[CoreAgent] Primary model (${turnModel}) failed: ${error.message}. Trying fallbacks.`);
 
           let success = false;
           let lastError = error;
@@ -516,11 +618,12 @@ class CoreAgent {
           for (const fbConfig of this.fallbackConfigs) {
             try {
               console.log(`[CoreAgent] Switching to fallback model: ${fbConfig.model}`);
-              this.model = fbConfig.model;
-              this.thinking = fbConfig.thinking || false;
-              this.stream = fbConfig.stream || false;
+              // 只切换本轮使用的模型，不污染其他并发回合
+              turnModel = fbConfig.model;
+              turnThinking = fbConfig.thinking || false;
+              turnStream = fbConfig.stream || false;
 
-              this.client = new OpenAI({
+              turnClient = new OpenAI({
                 baseURL: fbConfig.baseUrl,
                 apiKey: fbConfig.apiKey,
                 timeout: 60000,
@@ -529,16 +632,21 @@ class CoreAgent {
                 },
               });
 
-              requestOptions.model = this.model;
-              requestOptions.temperature = this.thinking ? 1 : 0.7;
+              this.model = turnModel;
+              this.thinking = turnThinking;
+              this.stream = turnStream;
+              this.client = turnClient;
 
-              const isFallbackStream = options.stream !== undefined ? options.stream : this.stream;
+              requestOptions.model = turnModel;
+              requestOptions.temperature = turnThinking ? 1 : 0.7;
+
+              const isFallbackStream = options.stream !== undefined ? options.stream : turnStream;
               requestOptions.stream = isFallbackStream;
 
-              console.log(`[CoreAgent] Retrying with fallback model: ${this.model}`);
+              console.log(`[CoreAgent] Retrying with fallback model: ${turnModel}`);
               choice = isFallbackStream
-                ? await this._handleStreamRequest(requestOptions, onChunk, onStream)
-                : await this._handleNormalRequest(requestOptions);
+                ? await this._handleStreamRequest(requestOptions, onChunk, onStream, turnClient)
+                : await this._handleNormalRequest(requestOptions, turnClient);
 
               if (!isFallbackStream && onStream) {
                 if (choice.reasoning_content) {
@@ -549,7 +657,7 @@ class CoreAgent {
                 }
               }
 
-              console.log(`[CoreAgent] Fallback to ${this.model} successful. Keeping fallback model for remaining steps.`);
+              console.log(`[CoreAgent] Fallback to ${turnModel} successful. Keeping fallback model for remaining steps.`);
               success = true;
               break; // Stop trying fallbacks
             } catch (fbError) {
@@ -693,6 +801,17 @@ class CoreAgent {
       throw loopError;
     }
 
+    // 循环耗尽（工具轮数用尽）或模型返回空内容时 finalResponse 会是空串，
+    // 以前直接 parseOutput('') 返回「无响应」，用户完全看不出发生了什么。
+    // 这里合成一条可读结论，并把最近工具输出带上，便于判断卡在哪一步。
+    if (!finalResponse) {
+      const recentTools = workingHistory.filter(m => m.role === 'tool').slice(-3);
+      finalResponse = recentTools.length > 0
+        ? `⚠️ 已达最大工具调用轮数（${maxIterations}），未能生成最终结论。\n\n最近几次工具输出：\n\n${recentTools.map(m => `- ${String(m.content || '').slice(0, 300)}`).join('\n')}`
+        : '⚠️ 模型没有返回任何内容，请重试，或检查模型/API 配置。';
+      console.warn(`[CoreAgent] 决策循环未收敛，已生成兜底回复（工具轮数上限 ${maxIterations}）`);
+    }
+
     // 执行成功，更新内存会话状态并保存
     this._sessions[sessionId] = workingHistory;
     await this._saveSession(sessionId, workingHistory);
@@ -705,8 +824,8 @@ class CoreAgent {
    * @param {object} requestOptions - API 请求参数
    * @returns {object} 解析后的 choice 数据 { role, content, tool_calls, reasoning_content }
    */
-  async _handleNormalRequest(requestOptions) {
-    const response = await this.client.chat.completions.create(requestOptions);
+  async _handleNormalRequest(requestOptions, client = this.client) {
+    const response = await client.chat.completions.create(requestOptions);
     const message = response.choices[0].message;
     return {
       role: message.role,
@@ -723,8 +842,8 @@ class CoreAgent {
    * @param {Function} [onStream] - 可选流式事件回调
    * @returns {object} 解析后的 choice 数据 { role, content, tool_calls, reasoning_content }
    */
-  async _handleStreamRequest(requestOptions, onChunk, onStream) {
-    const stream = await this.client.chat.completions.create(requestOptions);
+  async _handleStreamRequest(requestOptions, onChunk, onStream, client = this.client) {
+    const stream = await client.chat.completions.create(requestOptions);
 
     let content = '';
     let reasoningContent = '';
@@ -864,11 +983,62 @@ class CoreAgent {
   }
 
   /**
+   * 把历史消息格式化成摘要用的纯文本
+   * @param {Array} messages - 历史消息
+   * @returns {string}
+   */
+  _formatHistoryForSummary(messages) {
+    return messages.map(msg => {
+      const roleLabel = msg.role === 'user' ? '用户' :
+        msg.role === 'assistant' ? 'AI' :
+          msg.role === 'tool' ? '工具结果' :
+            msg.role === 'system' ? '系统' : msg.role;
+      let text = `[${roleLabel}]: ${msg.content || ''}`;
+      if (msg.tool_calls) {
+        text += ` (调用了工具: ${msg.tool_calls.map(tc => tc.function?.name).join(', ')})`;
+      }
+      return text;
+    }).join('\n');
+  }
+
+  /**
+   * 调 LLM 把一段历史压成摘要（自动压缩与手动 /compress 共用）
+   *
+   * 输入先按 MAX_COMPRESS_INPUT_CHARS 截断：历史本身可能已远超模型窗口，
+   * 全量塞进摘要请求会让压缩在最需要它的时候先失败（400 context_length_exceeded）。
+   *
+   * @param {Array} messages - 待摘要的消息
+   * @param {object} [client] - 本轮 OpenAI 客户端（不传则用实例字段）
+   * @param {string} [model] - 本轮模型名
+   * @returns {Promise<string>} 摘要文本
+   */
+  async _summarizeMessages(messages, client = this.client, model = this.model) {
+    const historyText = this._formatHistoryForSummary(messages);
+    const compressInput = historyText.length > MAX_COMPRESS_INPUT_CHARS
+      ? `…（更早内容已省略）…\n${historyText.slice(-MAX_COMPRESS_INPUT_CHARS)}`
+      : historyText;
+
+    const response = await client.chat.completions.create({
+      model,
+      messages: [
+        { role: 'system', content: '你是一个对话摘要助手，擅长提炼关键信息。' },
+        { role: 'user', content: `请将以下对话历史压缩为一段简洁的摘要，保留关键信息、决策和结果，去除冗余细节。用中文输出，不超过200字。\n\n${compressInput}` },
+      ],
+      temperature: 0.3,
+      max_tokens: 300,
+    });
+
+    return response.choices[0].message.content || '（历史摘要生成失败）';
+  }
+
+  /**
    * 压缩会话 — 用 LLM 将历史对话总结为摘要，替换原历史
    * @param {string} sessionId - 会话 ID
+   * @param {object} [client] - 本轮使用的 OpenAI 客户端（不传则用实例字段）
+   * @param {string} [model] - 本轮使用的模型名
    * @returns {object} { response }
    */
-  async compressSession(sessionId = 'default') {
+  async compressSession(sessionId = 'default', client = this.client, model = this.model) {
     if (!this._sessions[sessionId]) {
       this._sessions[sessionId] = await this._loadSession(sessionId);
     }
@@ -878,40 +1048,13 @@ class CoreAgent {
       return { response: '📝 会话很短，无需压缩。' };
     }
 
-    // 将历史消息格式化为文本供 LLM 总结
-    const historyText = history
-      .map(msg => {
-        const roleLabel = msg.role === 'user' ? '用户' :
-          msg.role === 'assistant' ? 'AI' :
-            msg.role === 'tool' ? '工具结果' :
-              msg.role === 'system' ? '系统' : msg.role;
-        let text = `[${roleLabel}]: ${msg.content || ''}`;
-        if (msg.tool_calls) {
-          text += ` (调用了工具: ${msg.tool_calls.map(tc => tc.function?.name).join(', ')})`;
-        }
-        return text;
-      })
-      .join('\n');
-
-    // 调用 LLM 生成摘要
-    const compressPrompt = `请将以下对话历史压缩为一段简洁的摘要，保留关键信息、决策和结果，去除冗余细节。用中文输出，不超过200字。\n\n${historyText}`;
-
     try {
-      const response = await this.client.chat.completions.create({
-        model: this.model,
-        messages: [
-          { role: 'system', content: '你是一个对话摘要助手，擅长提炼关键信息。' },
-          { role: 'user', content: compressPrompt },
-        ],
-        temperature: 0.3,
-        max_tokens: 300,
-      });
+      const summary = await this._summarizeMessages(history, client, model);
 
-      const summary = response.choices[0].message.content || '压缩失败';
-
-      // 用摘要替换原历史
+      // 用摘要替换原历史；user 角色 + compressed 标记，与自动压缩保持一致，
+      // 便于下一轮自动压缩识别「已有摘要」并合并而不是重复摘要
       this._sessions[sessionId] = [
-        { role: 'system', content: `以下是之前对话的摘要：\n${summary}` },
+        { role: 'user', content: `[对话摘要] ${summary}`, compressed: true },
       ];
       await this._saveSession(sessionId, this._sessions[sessionId]);
 

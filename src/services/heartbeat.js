@@ -66,8 +66,15 @@ class Heartbeat {
     this.tasks = [];            // 静态检查项任务列表
     this.dynamicTask = null;    // 动态巡检任务
     this.taskContent = config.dynamic_prompt || '';
+    // 单次巡检允许的工具轮数（后台任务预算，由 AgentService 按配置注入）
+    this.maxToolIterations = Number(config.max_tool_iterations) > 0
+      ? Number(config.max_tool_iterations)
+      : 5;
     this.onWarning = null;      // 警告回调: (message, result) => {}
     this._onDynamicChanged = null; // 动态巡检内容变更回调（用于持久化）
+    // 正在执行中的检查项名称：巡检要跑一整轮对话，耗时可能超过 interval，
+    // 上一轮没结束就跳过本次触发，避免同一检查项自我叠加、互相踩会话
+    this._runningChecks = new Set();
   }
 
   /**
@@ -75,6 +82,15 @@ class Heartbeat {
    */
   setOnWarning(handler) {
     this.onWarning = handler;
+  }
+
+  /**
+   * 设置单次巡检的工具轮数预算（后台任务比用户对话更紧）
+   * @param {number} n
+   */
+  setMaxToolIterations(n) {
+    const v = Number(n);
+    if (Number.isFinite(v) && v > 0) this.maxToolIterations = v;
   }
 
   /**
@@ -110,6 +126,13 @@ class Heartbeat {
     }
 
     console.log(`[Heartbeat] Starting (default interval: ${this.interval})`);
+
+    // 重名检查项会共享会话（toSessionId('hb', name)）并互相互斥，提前告警
+    const names = this.checks.map(c => c.name).filter(Boolean);
+    const duplicates = names.filter((n, i) => names.indexOf(n) !== i);
+    if (duplicates.length > 0) {
+      console.warn(`[Heartbeat] ⚠️ Duplicate check names: ${[...new Set(duplicates)].join(', ')} — 请在 heartbeat.yaml 中改为唯一 id/name，否则它们共享会话且无法并行`);
+    }
 
     for (const check of this.checks) {
       const checkInterval = check.interval || this.interval;
@@ -175,13 +198,26 @@ class Heartbeat {
    * 执行单个检查项
    */
   async _runCheck(check) {
+    // 互斥键与会话键优先用稳定 id：重名检查项不该共享会话、也不该互相吞掉触发
+    const checkKey = check.id || check.name || 'default';
+
+    // 同一检查项的重叠执行会写同一个会话历史（toSessionId('hb', ...)），
+    // 后结束的一轮会覆盖前一轮 → 直接跳过本次触发
+    if (this._runningChecks.has(checkKey)) {
+      console.warn(`[Heartbeat] Skip "${checkKey}": previous run still in progress`);
+      return;
+    }
+    this._runningChecks.add(checkKey);
+
     try {
       console.log(`[Heartbeat] Check: ${check.name}`);
 
       if (this.agent && typeof this.agent.decide === 'function') {
         const result = await this.agent.decide(check.prompt, {
           // 每个巡检项独占会话，避免不同巡检项与定时任务共享上下文
-          sessionId: toSessionId('hb', check.name),
+          sessionId: toSessionId('hb', check.id || check.name),
+          // 巡检走后台预算：工具轮数用尽后强制给结论，而不是无限试探
+          maxToolIterations: this.maxToolIterations,
           appendSystemPrompt: `当前检查项: ${check.name}\n如果发现异常，请在返回的 JSON 中设置 "is_warning": true 并提供 "reply" 说明情况。`,
         });
         console.log(`[Heartbeat] ${check.name} result:`, result);
@@ -209,6 +245,8 @@ class Heartbeat {
       }
     } catch (error) {
       console.error(`[Heartbeat] Check failed (${check.name}):`, error.message);
+    } finally {
+      this._runningChecks.delete(checkKey);
     }
   }
 

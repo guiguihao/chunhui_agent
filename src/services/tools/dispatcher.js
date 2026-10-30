@@ -60,6 +60,16 @@ export async function handleToolCall(ctx, toolName, args = {}) {
   /**
    * 处理记忆工具调用（异步，通过 MemoryService 的正式方法读写）
    */
+// 记忆文件级写队列：多个回合（cron 任务/心跳/用户对话）同时更新同一记忆文件时
+// 串行化「读-改-写」，避免后写覆盖先写（键：记忆文件类别）
+const memoryWriteQueues = new Map();
+const withMemoryLock = (key, fn) => {
+  const prev = memoryWriteQueues.get(key) || Promise.resolve();
+  const next = prev.then(fn, fn);
+  memoryWriteQueues.set(key, next);
+  return next;
+};
+
 export async function handleMemoryTool(ctx, toolName, args = {}) {
     if (!ctx._memoryService) return '记忆服务未配置';
 
@@ -68,22 +78,22 @@ export async function handleMemoryTool(ctx, toolName, args = {}) {
         case 'memory_get_user_profile':
           return await ctx._memoryService.loadUserProfile();
         case 'memory_update_user_profile':
-          await ctx._memoryService.updateUserProfile(args.content);
+          await withMemoryLock('user_profile', () => ctx._memoryService.updateUserProfile(args.content));
           return '已更新用户偏好';
         case 'memory_get_knowledge':
           return await ctx._memoryService.loadKnowledge();
         case 'memory_update_knowledge':
-          await ctx._memoryService.updateKnowledge(args.content);
+          await withMemoryLock('knowledge', () => ctx._memoryService.updateKnowledge(args.content));
           return '已更新长期知识库';
         case 'memory_get_facts':
           return await ctx._memoryService.loadFacts();
         case 'memory_update_facts':
-          await ctx._memoryService.updateFacts(args.content);
+          await withMemoryLock('facts', () => ctx._memoryService.updateFacts(args.content));
           return '已更新事实记录';
         case 'memory_get_context':
           return await ctx._memoryService.loadContext();
         case 'memory_update_context':
-          await ctx._memoryService.updateContext(args.content);
+          await withMemoryLock('context', () => ctx._memoryService.updateContext(args.content));
           return '已更新对话背景';
         default:
           return `未知记忆工具: ${toolName}`;

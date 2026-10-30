@@ -17,6 +17,8 @@ const isTaskRunning = (data) => {
 class Scheduler {
   constructor() {
     this.tasks = new Map();
+    // 任务 id → 执行链（overlap: 'queue' 时上一轮没跑完就接在后面跑）
+    this._chains = new Map();
   }
 
   /**
@@ -38,7 +40,7 @@ class Scheduler {
     // 期望启用状态：优先取显式 enabled，否则与是否立即调度保持一致
     const enabled = options.enabled !== undefined ? options.enabled !== false : scheduled;
 
-    const run = async () => {
+    const realHandler = async () => {
       console.log(`[Scheduler] Executing: ${id} (${options.name || 'unnamed'})`);
       try {
         await handler();
@@ -47,7 +49,23 @@ class Scheduler {
       }
     };
 
-    const taskOptions = { timezone: options.timezone || 'Asia/Shanghai' };
+    // overlap: 'skip'（默认，靠 noOverlap 丢弃重叠触发）
+    //        | 'queue'（上一轮没跑完就接在后面跑，适合监控/哨兵类任务，不丢触发）
+    const run = options.overlap === 'queue'
+      ? () => {
+          const prev = this._chains.get(id) || Promise.resolve();
+          const next = prev.then(realHandler, realHandler);
+          this._chains.set(id, next);
+          return next;
+        }
+      : realHandler;
+
+    const taskOptions = {
+      timezone: options.timezone || 'Asia/Shanghai',
+      // 任务耗时可能超过触发间隔（一轮对话 + 多次工具调用），
+      // noOverlap 让上一轮未结束时跳过本次触发，避免同一任务自我叠加
+      noOverlap: options.noOverlap !== false,
+    };
 
     // ⚠️ node-cron v4 的 schedule() 会无条件立即 start()，"scheduled" 选项已被移除。
     // 若继续传 { scheduled: false }，enabled: false 的任务照样会按时执行。
@@ -97,6 +115,8 @@ class Scheduler {
           prompt: taskConfig.prompt,
           autoStart: enabled,
           enabled,
+          // cron.yaml 里可为监控/哨兵类任务声明 overlap: queue（重叠触发改为排队补跑）
+          overlap: taskConfig.overlap,
         }
       );
     }
@@ -117,6 +137,7 @@ class Scheduler {
         taskData.task.stop();
       }
       this.tasks.delete(id);
+      this._chains.delete(id);
       console.log(`[Scheduler] Unregistered: ${id}`);
     }
   }
@@ -196,6 +217,7 @@ class Scheduler {
       enabled: data.enabled !== false,
       running: isTaskRunning(data),
       prompt: data.options.prompt || '',
+      overlap: data.options.overlap,
     }));
   }
 }

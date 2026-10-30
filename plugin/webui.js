@@ -228,19 +228,27 @@ class WebUIService {
     const targetSession = sessionId || await this.resolveSessionId();
     if (!targetSession) return null;
 
-    if (!coreAgent._sessions) coreAgent._sessions = {};
-    if (!coreAgent._sessions[targetSession]) {
-      coreAgent._sessions[targetSession] = await coreAgent._loadSession(targetSession);
-    }
+    const write = async () => {
+      if (!coreAgent._sessions) coreAgent._sessions = {};
+      if (!coreAgent._sessions[targetSession]) {
+        coreAgent._sessions[targetSession] = await coreAgent._loadSession(targetSession);
+      }
 
-    const history = coreAgent._sessions[targetSession] || [];
-    history.push({ role: 'system', content: text });
-    coreAgent._sessions[targetSession] = history;
+      const history = coreAgent._sessions[targetSession] || [];
+      history.push({ role: 'system', content: text });
+      coreAgent._sessions[targetSession] = history;
 
-    if (typeof coreAgent._saveSession === 'function') {
-      await coreAgent._saveSession(targetSession, history);
-    }
-    return targetSession;
+      if (typeof coreAgent._saveSession === 'function') {
+        await coreAgent._saveSession(targetSession, history);
+      }
+      return targetSession;
+    };
+
+    // 与该会话的 decide 串行：否则正在进行的回合结束时会把整套 workingHistory
+    // 写回 _sessions[sessionId]，刚追加的告警被静默覆盖
+    return typeof coreAgent.runExclusive === 'function'
+      ? coreAgent.runExclusive(targetSession, write)
+      : write();
   }
 
   /**
@@ -265,8 +273,11 @@ class WebUIService {
    */
   async broadcast(text) {
     try {
-      const sessionId = await this.appendSystemMessage(text);
+      const sessionId = await this.resolveSessionId();
+      // 先推实时：会话正忙时写历史需要排队等当前回合结束，
+      // 先等写入完成再推送会把告警延迟到回复结束之后才出现
       this.pushEvent({ type: 'notice', content: text, sessionId });
+      await this.appendSystemMessage(text, sessionId);
       // 排障关键信息：有没有浏览器在线、落到了哪个会话
       console.log(`[WebUI] Broadcast → session=${sessionId || '(none)'}, clients=${this._sseClients.size}`);
       return true;

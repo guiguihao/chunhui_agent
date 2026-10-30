@@ -40,11 +40,16 @@ export function trimHistory(history, maxLen) {
     }
 
     // 同样检查开头是否有 tool_calls 但缺少后续 tool_result 的 assistant 消息
+    // 必须按「全部 callId 都有响应」判断：只看 trimmed[1] 时，
+    // 多工具调用被截断一半也会被误判为完整，随后被 cleanHistory/normalizeMessages 整段丢弃
     while (trimmed.length > 0) {
       const first = trimmed[0];
       if (first.role === 'assistant' && first.tool_calls && first.tool_calls.length > 0) {
-        // 检查紧跟的消息是否是对应第一个 tool_call 的 tool_result
-        if (trimmed.length > 1 && trimmed[1].role === 'tool') {
+        const callIds = first.tool_calls.map(tc => tc.id);
+        const answered = new Set(
+          trimmed.slice(1).filter(m => m.role === 'tool').map(m => m.tool_call_id)
+        );
+        if (callIds.every(id => answered.has(id))) {
           break; // 配对完整，保留
         }
         // 缺少 tool_result，移除这条 assistant 消息
@@ -52,6 +57,12 @@ export function trimHistory(history, maxLen) {
       } else {
         break;
       }
+    }
+
+    // 移除残缺 assistant 后可能又露出孤立的 tool 结果，再清一次，
+    // 保证 trimHistory 的输出与 cleanHistory 的判定口径一致
+    while (trimmed.length > 0 && trimmed[0].role === 'tool') {
+      trimmed = trimmed.slice(1);
     }
 
     return trimmed;

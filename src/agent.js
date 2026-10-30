@@ -32,6 +32,8 @@ class SmartHomeAgent {
     this.skill = null;     // 技能服务
     this.feishu = null;
     this.webui = null;
+    // cron.yaml 写入队列：多个回合同时增删任务时串行化，避免快照覆盖丢变更
+    this._cronSaveQueue = null;
   }
 
   /**
@@ -82,6 +84,8 @@ class SmartHomeAgent {
 
     // 5. 初始化心跳
     this.heartbeat = new Heartbeat(this.agent, this.config.heartbeat);
+    // 后台任务（巡检）给紧预算：巡检要的是结论，不是无限次工具试探
+    this.heartbeat.setMaxToolIterations(this._backgroundToolIterations());
     this.agent.setHeartbeat(this.heartbeat);
 
     // 动态巡检内容变动时持久化到 config/heartbeat.yaml
@@ -95,6 +99,8 @@ class SmartHomeAgent {
       const res = await this.thinkAndAct(prompt, {
         // 每个定时任务独占会话，避免不同任务上下文互相污染
         sessionId: toSessionId('cron', taskConfig.id),
+        // 后台任务给紧预算，避免卡在工具循环里反复试探
+        maxToolIterations: this._backgroundToolIterations(),
       });
       console.log(`Cron triggered: ${taskConfig.name}, result: ${JSON.stringify(res)}`);
       const reply = res?.reply || res?.response;
@@ -295,6 +301,17 @@ class SmartHomeAgent {
   }
 
   /**
+   * 后台任务（定时任务 / 心跳巡检）可用的工具轮数预算
+   *
+   * 比用户对话更紧：后台任务要的是「结论 + 告警」，卡在工具循环里毫无意义，
+   * 而且每轮都是一次完整的 LLM 调用，长时间循环会持续烧 token。
+   */
+  _backgroundToolIterations() {
+    const v = Number(this.config.agent?.background_tool_iterations);
+    return Number.isFinite(v) && v > 0 ? v : 5;
+  }
+
+  /**
    * 从配置中构建模型配置
    * 支持 default 为数组，实现主模型与多个备用模型。
    */
@@ -414,6 +431,9 @@ class SmartHomeAgent {
       primaryConfigs: resolvedPrimaryConfigs,
       fallbackConfigs: resolvedFallbackConfigs,
       systemPrompt: systemPrompt,
+      // 上下文与工具轮数预算（此前只有代码里的硬编码默认值，配置写了也不生效）
+      maxContextTurns: this.config.agent?.max_context_turns,
+      maxToolIterations: this.config.agent?.max_tool_iterations,
       // 额外的文件只读根目录（除 workspace 外），用于让 Agent 读取指定数据目录
       fileReadRoots: this.config.agent?.file_read_roots || [],
       // 是否将完整 README 注入系统提示（默认 false，改用精简摘要以降低 token 消耗）
@@ -433,6 +453,8 @@ class SmartHomeAgent {
       console.log(`[Agent] Static Cron triggered: ${taskConfig.name}`);
       const result = await this.thinkAndAct(prompt, {
         sessionId: toSessionId('cron', taskConfig.id),
+        // 后台任务给紧预算，避免卡在工具循环里反复试探
+        maxToolIterations: this._backgroundToolIterations(),
       });
       const reply = result?.reply || result?.response;
 
@@ -474,25 +496,30 @@ class SmartHomeAgent {
    */
   async saveCronTasks() {
     if (!this.scheduler) return;
-    try {
-      const tasks = this.scheduler.listTasks();
-      const cronPath = path.join(process.cwd(), 'config', 'cron.yaml');
-      const yamlContent = yaml.stringify({
-        cron: {
-          tasks: tasks.map(t => ({
-            id: t.id,
-            name: t.name,
-            cron: t.cron,
-            enabled: t.enabled !== false,
-            prompt: t.prompt || '',
-          })),
-        },
-      });
-      await fs.writeFile(cronPath, yamlContent, 'utf8');
-      console.log(`[Agent] 💾 Saved ${tasks.length} cron task(s) to config/cron.yaml`);
-    } catch (e) {
-      console.error('[Agent] Failed to save cron.yaml:', e.message);
-    }
+    // 串行化写入：两个回合同时增删任务时各自基于 listTasks() 快照全量重写，
+    // 不加锁的话后写会丢掉先写的变更
+    this._cronSaveQueue = (this._cronSaveQueue || Promise.resolve())
+      .then(async () => {
+        const tasks = this.scheduler.listTasks();
+        const cronPath = path.join(process.cwd(), 'config', 'cron.yaml');
+        const yamlContent = yaml.stringify({
+          cron: {
+            tasks: tasks.map(t => ({
+              id: t.id,
+              name: t.name,
+              cron: t.cron,
+              enabled: t.enabled !== false,
+              prompt: t.prompt || '',
+              // yaml.stringify 会自动省略 undefined，默认（skip）不会写进文件
+              overlap: t.overlap,
+            })),
+          },
+        });
+        await fs.writeFile(cronPath, yamlContent, 'utf8');
+        console.log(`[Agent] 💾 Saved ${tasks.length} cron task(s) to config/cron.yaml`);
+      })
+      .catch(e => console.error('[Agent] Failed to save cron.yaml:', e.message));
+    await this._cronSaveQueue;
   }
 
   /**
