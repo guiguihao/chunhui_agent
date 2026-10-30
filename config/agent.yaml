@@ -58,7 +58,7 @@ memory:
 
 # 模型配置 
 models:
-  default: "moda/ZhipuAI/GLM-5.3-Flash"
+  default: "moda/Qwen/Qwen3.8-Flash-Next"
   fallback: "moda/deepseek-ai/DeepSeek-V4.1-Flash-1017"
   providers:
     - name: nvidia
@@ -83,5 +83,11 @@ models:
           thinking: false
           stream: true
         - id: "ZhipuAI/GLM-5.3-Flash"
+          thinking: false
+          stream: true
+        - id: "deepseek-ai/DeepSeek-V4.1-Flash"
+          thinking: false
+          stream: true
+        - id: "Qwen/Qwen3.8-Flash-Next"
           thinking: false
           stream: true

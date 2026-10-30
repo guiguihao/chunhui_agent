@@ -44,6 +44,20 @@ class Heartbeat {
   }
 
   /**
+   * 销毁一个 node-cron 任务
+   *
+   * node-cron v4 会把任务登记进全局 registry，只 stop() 只是停掉定时器、
+   * 记录仍留在表里（心跳每次 reload 都会重建任务，会越积越多）。
+   * 必须 destroy() 才会触发 task:destroyed 让 registry 摘除；
+   * v3 没有 destroy()，退化用 stop()。
+   */
+  _destroyTask(task) {
+    if (!task) return;
+    if (typeof task.destroy === 'function') task.destroy();
+    else task.stop();
+  }
+
+  /**
    * 启动心跳
    * 每个 check 使用自己的 interval，若未设置则使用全局 interval
    */
@@ -82,14 +96,12 @@ class Heartbeat {
    */
   stop() {
     for (const task of this.tasks) {
-      task.stop();
+      this._destroyTask(task);
     }
     this.tasks = [];
 
-    if (this.dynamicTask) {
-      this.dynamicTask.stop();
-      this.dynamicTask = null;
-    }
+    this._destroyTask(this.dynamicTask);
+    this.dynamicTask = null;
     console.log('[Heartbeat] Stopped');
   }
 
@@ -112,10 +124,8 @@ class Heartbeat {
    * 重新调度动态巡检（内容变更后立即生效，无需重启）
    */
   _rescheduleDynamic() {
-    if (this.dynamicTask) {
-      this.dynamicTask.stop();
-      this.dynamicTask = null;
-    }
+    this._destroyTask(this.dynamicTask);
+    this.dynamicTask = null;
     this.dynamicTask = this._scheduleDynamic();
   }
 

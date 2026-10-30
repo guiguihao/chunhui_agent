@@ -272,11 +272,13 @@ export default function SessionView() {
       .then(res => res.json())
       .then(data => {
         if (data.history && data.history.length > 0) {
-          // 历史记录映射为带 thinking/tools 属性的对象，保持兼容性
+          // 历史记录里的 tools 必须保留：后端已把 assistant.tool_calls 与
+          // 对应的 role=tool 结果组装好，丢弃的话刷新后就只剩气泡、
+          // 与流式时的工具卡片不一致
           const mapped = data.history.map(m => ({
             ...m,
             isThinkingFinished: true,
-            tools: []
+            tools: m.tools || []
           }));
           setMessages(mapped)
         }

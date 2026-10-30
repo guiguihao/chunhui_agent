@@ -7,6 +7,79 @@ import os from 'os';
 import { log } from 'console';
 import { isInside } from '../src/services/pathguard.js';
 
+/** 把工具参数（可能是 JSON 字符串）格式化成便于阅读的文本 */
+function formatToolArgs(raw) {
+  if (raw === undefined || raw === null || raw === '') return '';
+  try {
+    return JSON.stringify(typeof raw === 'string' ? JSON.parse(raw) : raw, null, 2);
+  } catch {
+    return String(raw);
+  }
+}
+
+/** 工具结果兜底转字符串（历史里通常是字符串，但防御性处理） */
+function formatToolResult(content) {
+  if (typeof content === 'string') return content;
+  try { return JSON.stringify(content ?? '', null, 2); } catch { return String(content); }
+}
+
+/**
+ * 把磁盘上的会话历史（OpenAI messages）整理成前端可直接渲染的列表
+ *
+ * 一次工具调用会在历史里留下两条消息：assistant(tool_calls) + role=tool。
+ * 过去是把 role=tool 硬转成 system 气泡、内容退化成「[工具返回结果]」之类的
+ * 占位文本，于是刷新后会话页满屏都是
+ *   [执行工具: mgmt_heartbeat_get, tasktodolist]
+ *   未知管理工具: [object Object]
+ * 这类裸文本，而流式输出时它们本来是折叠的工具卡片 —— 同一段会话两种样子。
+ *
+ * 这里把同一轮的工具调用与对应结果重新组装成 { tools: [...] }，
+ * 结构与 SSE 的 tool_start / tool_end 对齐，前端复用同一套卡片渲染。
+ */
+export function buildDisplayHistory(history = []) {
+  const items = [];
+  let openGroup = null; // 当前等待填充结果的工具组
+
+  for (const msg of history) {
+    if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+      openGroup = {
+        role: 'assistant',
+        content: msg.content || '',
+        tools: msg.tool_calls.map(tc => ({
+          id: tc.id || `${tc.function?.name || 'tool'}-${items.length}`,
+          name: tc.function?.name || 'unknown',
+          args: formatToolArgs(tc.function?.arguments),
+          status: 'done',
+          result: '',
+        })),
+      };
+      items.push(openGroup);
+      continue;
+    }
+
+    if (msg.role === 'tool') {
+      const target = openGroup?.tools.find(t => t.id === msg.tool_call_id);
+      if (target) {
+        target.result = formatToolResult(msg.content);
+      } else {
+        // 历史被裁剪后可能只剩孤立的结果，单独兜底展示
+        items.push({ role: 'system', content: `[工具返回结果] ${formatToolResult(msg.content)}` });
+      }
+      continue;
+    }
+
+    // 非工具消息打断分组，避免后续孤立结果错挂到上一组
+    openGroup = null;
+
+    const content = typeof msg.content === 'string' ? msg.content : '';
+    if (!content.trim()) continue;
+    items.push({ role: msg.role === 'system' ? 'system' : msg.role, content });
+  }
+
+  const now = Date.now();
+  return items.map((item, index) => ({ id: now + index, ...item }));
+}
+
 /**
  * 将 .env 变量的值格式化为安全字面量
  *
@@ -632,21 +705,7 @@ class WebUIService {
         }
 
         const history = coreAgent._sessions[sessionId] || [];
-        const displayHistory = history.map((msg, index) => {
-          let content = msg.content;
-          if (!content) {
-            if (msg.tool_calls) content = `[执行工具: ${msg.tool_calls.map(t => t.function?.name).join(', ')}]`;
-            else if (msg.role === 'tool') content = `[工具返回结果]`;
-            else content = '';
-          }
-          return {
-            id: Date.now() + index,
-            role: msg.role === 'tool' ? 'system' : msg.role,
-            content,
-          };
-        }).filter(msg => msg.content);
-
-        res.json({ history: displayHistory });
+        res.json({ history: buildDisplayHistory(history) });
       } catch (err) {
         res.status(500).json({ error: err.message });
       }

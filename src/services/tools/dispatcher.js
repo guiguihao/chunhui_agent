@@ -15,18 +15,24 @@ import { sanitizeToolName } from '../toolname.js';
    */
 export async function handleToolCall(ctx, toolName, args = {}) {
     // 过滤掉可能由某些模型输出附加的特殊标记后缀 (如 <|channel|>commentary)
-    const cleanToolName = typeof toolName === 'string' ? toolName.replace(/<\|.*$/, '').trim() : toolName;
+    // 另外模型偶尔会把 name 输出成对象，这里统一转成字符串，
+    // 否则下面的 startsWith 会抛 TypeError，工具调用直接失败
+    const rawName = typeof toolName === 'string' ? toolName : String(toolName ?? '');
+    const cleanToolName = rawName.replace(/<\|.*$/, '').trim();
 
+    // ⚠️ 各处理器签名均为 (ctx, toolName, args)，ctx 必须透传：
+    // 漏掉会让 toolName 收到 ctx 对象（表现为「未知管理工具: [object Object]」），
+    // 且处理器内部的 ctx._memoryService / _scheduler 全部取不到。
     if (cleanToolName.startsWith('memory_')) {
-      return await handleMemoryTool(cleanToolName, args);
+      return await handleMemoryTool(ctx, cleanToolName, args);
     } else if (cleanToolName.startsWith('mgmt_')) {
-      return handleManagementTool(cleanToolName, args);
+      return handleManagementTool(ctx, cleanToolName, args);
     } else if (cleanToolName.startsWith('mcp_')) {
-      return await handleMCPToolCall(cleanToolName, args);
+      return await handleMCPToolCall(ctx, cleanToolName, args);
     } else if (cleanToolName.startsWith('file_')) {
-      return await handleFileTool(cleanToolName, args);
+      return await handleFileTool(ctx, cleanToolName, args);
     } else if (cleanToolName.startsWith('cmd_')) {
-      return await handleCommandTool(cleanToolName, args);
+      return await handleCommandTool(ctx, cleanToolName, args);
     }
 
     // 兜底：尝试作为动态映射的技能处理
@@ -36,7 +42,9 @@ export async function handleToolCall(ctx, toolName, args = {}) {
       const targetSkill = skills.find(s => sanitizeToolName(s.name) === cleanToolName);
       if (targetSkill) {
         console.log(`[CoreAgent] 动态路由技能工具: ${cleanToolName} -> ${targetSkill.name}`);
-        const result = await ctx._skillService.run(targetSkill.name, args, this);
+        // 第三个参数是 agent，之前传的 this 在模块函数里是 undefined，
+        // 技能内部调用 agent.decide() 会直接抛「Cannot read properties of undefined」
+        const result = await ctx._skillService.run(targetSkill.name, args, ctx);
 
         // 自动脱壳：如果返回的是 {response: '...'} 或 {reply: '...'}，只取内容
         if (result && typeof result === 'object') {

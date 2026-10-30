@@ -28,3 +28,7 @@
   - 采暖水压 sensor.bi_gua_lu_kong_zhi_qi_cai_nuan_re_shui_shui_ya 自接入起 unknown（数据缺失，已知缺陷）
 - 当前正常项：连接状态在线、采暖开关 off、童锁 off、设定值均在范围（热水60/采暖40/室内32）
 - 巡检防刷屏键：memory context 中 boiler_alert_active 记录活动异常集合，异常新增/消除/升级才发飞书预警
+
+## 工具自检记录 2026-10-30 11:23
+- 正常：weather、baidu-search、file_write/read/list、memory_get_user_profile/facts/knowledge
+- 异常：memory_get_context（记忆服务未配置）、mgmt_cron_list/heartbeat_get（未知管理工具 [object Object]）、cmd_exec（未知命令工具）、tasktodolist 与 ureal-skill（Cannot read properties of undefined reading 'decide'）

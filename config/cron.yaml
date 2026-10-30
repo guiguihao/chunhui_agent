@@ -12,13 +12,13 @@ cron:
       prompt: 今天早上的新闻，20条，内容涵盖科技、财经和民生等领域 (不要表格)
     - id: stock_news
       name: 股市早报
-      cron: 0 9 * * *
+      cron: 0 10 * * *
       enabled: false
       prompt: 股市早报，20条内容， 并附带投资建议 (不要表格)
     - id: stock_noon_news
       name: 股市午报
       cron: 0 12 * * *
-      enabled: false
+      enabled: true
       prompt: 股市午报，20条内容， 并附带投资建议 (不要表格)
     - id: night_news
       name: 夜间新闻

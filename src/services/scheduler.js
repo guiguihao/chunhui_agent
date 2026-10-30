@@ -1,6 +1,16 @@
 import cron from 'node-cron';
 
 /**
+ * 实际调度状态：v4 有 getStatus()（idle/running/stopped/destroyed），旧版本回退到本地标记。
+ * 只信本地 running 标记会在 v4 下说谎（禁用任务其实在跑）。
+ */
+const isTaskRunning = (data) => {
+  const status = typeof data.task.getStatus === 'function' ? data.task.getStatus() : null;
+  if (status) return status === 'idle' || status === 'running';
+  return Boolean(data.running);
+};
+
+/**
  * Cron 定时任务调度
  * 根据 config/cron.yaml 配置执行定时任务
  */
@@ -28,17 +38,30 @@ class Scheduler {
     // 期望启用状态：优先取显式 enabled，否则与是否立即调度保持一致
     const enabled = options.enabled !== undefined ? options.enabled !== false : scheduled;
 
-    const task = cron.schedule(cronExpression, async () => {
+    const run = async () => {
       console.log(`[Scheduler] Executing: ${id} (${options.name || 'unnamed'})`);
       try {
         await handler();
       } catch (error) {
         console.error(`[Scheduler] Error in task ${id}:`, error.message);
       }
-    }, {
-      scheduled,
-      timezone: options.timezone || 'Asia/Shanghai',
-    });
+    };
+
+    const taskOptions = { timezone: options.timezone || 'Asia/Shanghai' };
+
+    // ⚠️ node-cron v4 的 schedule() 会无条件立即 start()，"scheduled" 选项已被移除。
+    // 若继续传 { scheduled: false }，enabled: false 的任务照样会按时执行。
+    // 因此优先用只创建、不启动的 createTask()，老版本才回退到 scheduled: false。
+    const task = typeof cron.createTask === 'function'
+      ? cron.createTask(cronExpression, run, taskOptions)
+      : cron.schedule(cronExpression, run, { ...taskOptions, scheduled: false });
+
+    if (scheduled) {
+      task.start();
+    } else if (typeof task.stop === 'function') {
+      // 双保险：万一回退到了自启路径，立刻停掉
+      task.stop();
+    }
 
     this.tasks.set(id, { task, handler, options, cronExpression, running: scheduled, enabled });
     console.log(`[Scheduler] Registered: ${id} - "${cronExpression}" (${scheduled ? 'enabled' : 'disabled'})`);
@@ -86,7 +109,13 @@ class Scheduler {
   unregister(id) {
     const taskData = this.tasks.get(id);
     if (taskData) {
-      taskData.task.stop();
+      // node-cron v4 会把任务登记进全局 registry，只有 destroy() 才会一并摘除，
+      // 否则每次 reloadCron() 都会泄漏一条（旧版本没有 destroy，退化用 stop）
+      if (typeof taskData.task.destroy === 'function') {
+        taskData.task.destroy();
+      } else {
+        taskData.task.stop();
+      }
       this.tasks.delete(id);
       console.log(`[Scheduler] Unregistered: ${id}`);
     }
@@ -165,7 +194,7 @@ class Scheduler {
       cron: data.cronExpression,
       // enabled = 期望状态（持久化依据），running = 实际调度状态
       enabled: data.enabled !== false,
-      running: Boolean(data.running),
+      running: isTaskRunning(data),
       prompt: data.options.prompt || '',
     }));
   }
