@@ -18,7 +18,7 @@ cron:
     - id: stock_noon_news
       name: 股市午报
       cron: 0 12 * * *
-      enabled: true
+      enabled: false
       prompt: 股市午报，20条内容， 并附带投资建议 (不要表格)
     - id: night_news
       name: 夜间新闻
@@ -40,3 +40,13 @@ cron:
       cron: 35 17 * * *
       enabled: false
       prompt: 下班了，关闭所有灯光（周一到周五）
+    - id: daily_weather_1529
+      name: 每日天气早报
+      cron: 29 15 * * *
+      enabled: false
+      prompt: 每日天气早报：调用 weather 技能查询杭州当天天气与未来趋势，整理成简明早报（温度、体感、降水、风力、穿衣/开窗/空调建议），推送给主人。
+    - id: test_ok_1533
+      name: 测试发送ok
+      cron: 35 15 * * *
+      enabled: false
+      prompt: 向主人发送一条消息，内容只有：ok

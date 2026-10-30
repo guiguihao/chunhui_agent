@@ -6,6 +6,7 @@ import yaml from 'yaml';
 import os from 'os';
 import { log } from 'console';
 import { isInside } from '../src/services/pathguard.js';
+import { isValidCron, cronValidationError } from '../src/services/cron-utils.js';
 
 /** 把工具参数（可能是 JSON 字符串）格式化成便于阅读的文本 */
 function formatToolArgs(raw) {
@@ -543,11 +544,26 @@ class WebUIService {
 
     this.app.post('/api/cron', async (req, res) => {
       try {
+        const tasks = Array.isArray(req.body?.tasks) ? req.body.tasks : [];
+
+        // 与前端 webui/src/lib/cron.js、会话工具 mgmt_cron_add 同口径校验：
+        // 非法表达式一旦落盘，重建调度器会抛错，旧任务全部停摆，
+        // 且下次启动解析失败 —— 必须在写文件之前拦下
+        for (const task of tasks) {
+          if (!isValidCron(task?.cron)) {
+            const label = task?.name || task?.id || '(未命名任务)';
+            return res.status(400).json({
+              success: false,
+              error: `${label}: ${cronValidationError(task?.cron)}`,
+            });
+          }
+        }
+
         const p = path.join(process.cwd(), 'config', 'cron.yaml');
         let content = await fs.readFile(p, 'utf8');
         const parsed = yaml.parse(content) || {};
         if (!parsed.cron) parsed.cron = {};
-        parsed.cron.tasks = req.body.tasks || [];
+        parsed.cron.tasks = tasks;
         // 只更新 tasks 块，重新序列化（cron.yaml 没有特殊模板变量）
         await fs.writeFile(p, yaml.stringify(parsed), 'utf8');
 

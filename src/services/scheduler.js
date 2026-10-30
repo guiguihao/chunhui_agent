@@ -94,8 +94,10 @@ class Scheduler {
    *
    * @param {Array} tasksConfig - 任务配置数组
    * @param {Function} executor - 执行函数 (接收 prompt 参数)
+   * @returns {{registered: number, failed: Array<{id: string, error: string}>}}
    */
   registerTasks(tasksConfig, executor) {
+    const failed = [];
     for (const taskConfig of tasksConfig) {
       const enabled = taskConfig.enabled !== false;
 
@@ -103,23 +105,31 @@ class Scheduler {
         console.log(`[Scheduler] Registering disabled task (not scheduled): ${taskConfig.id}`);
       }
 
-      this.register(
-        taskConfig.id,
-        taskConfig.cron,
-        async () => {
-          console.log(`[Scheduler] Trigger: ${taskConfig.name}`);
-          await executor(taskConfig.prompt, taskConfig);
-        },
-        {
-          name: taskConfig.name,
-          prompt: taskConfig.prompt,
-          autoStart: enabled,
-          enabled,
-          // cron.yaml 里可为监控/哨兵类任务声明 overlap: queue（重叠触发改为排队补跑）
-          overlap: taskConfig.overlap,
-        }
-      );
+      try {
+        // 单个任务表达式非法（例如手改 cron.yaml 写错）不应该中断整批注册，
+        // 否则后面的任务全部不生效，调度器看起来「整个瞎了」
+        this.register(
+          taskConfig.id,
+          taskConfig.cron,
+          async () => {
+            console.log(`[Scheduler] Trigger: ${taskConfig.name}`);
+            await executor(taskConfig.prompt, taskConfig);
+          },
+          {
+            name: taskConfig.name,
+            prompt: taskConfig.prompt,
+            autoStart: enabled,
+            enabled,
+            // cron.yaml 里可为监控/哨兵类任务声明 overlap: queue（重叠触发改为排队补跑）
+            overlap: taskConfig.overlap,
+          }
+        );
+      } catch (e) {
+        failed.push({ id: taskConfig.id, error: e.message });
+        console.error(`[Scheduler] 注册任务失败 ${taskConfig.id} (${taskConfig.cron}): ${e.message}`);
+      }
     }
+    return { registered: this.tasks.size, failed };
   }
 
   /**
@@ -202,6 +212,15 @@ class Scheduler {
       taskData.running = false;
     }
     console.log('[Scheduler] Stopped all tasks');
+  }
+
+  /**
+   * 是否已注册指定任务
+   * @param {string} id - 任务 ID
+   * @returns {boolean}
+   */
+  has(id) {
+    return this.tasks.has(id);
   }
 
   /**

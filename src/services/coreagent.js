@@ -307,7 +307,7 @@ class CoreAgent {
     return handleCommandTool(this, toolName, args);
   }
 
-  _handleManagementTool(toolName, args = {}) {
+  async _handleManagementTool(toolName, args = {}) {
     return handleManagementTool(this, toolName, args);
   }
 

@@ -1,6 +1,7 @@
 import path from 'path';
 import { FileAccessPolicy } from '../pathguard.js';
 import { sanitizeToolName } from '../toolname.js';
+import { isValidCron, cronValidationError } from '../cron-utils.js';
 
 /**
  * 工具分发与执行
@@ -26,7 +27,7 @@ export async function handleToolCall(ctx, toolName, args = {}) {
     if (cleanToolName.startsWith('memory_')) {
       return await handleMemoryTool(ctx, cleanToolName, args);
     } else if (cleanToolName.startsWith('mgmt_')) {
-      return handleManagementTool(ctx, cleanToolName, args);
+      return await handleManagementTool(ctx, cleanToolName, args);
     } else if (cleanToolName.startsWith('mcp_')) {
       return await handleMCPToolCall(ctx, cleanToolName, args);
     } else if (cleanToolName.startsWith('file_')) {
@@ -338,70 +339,98 @@ export async function handleCommandTool(ctx, toolName, args = {}) {
   }
   /**
    * 处理管理工具调用
+   *
+   * 改为 async：任务变更回调（_onCronTasksChanged → saveCronTasks）是异步落盘，
+   * 不 await 会在进程退出或下一回合重写时丢掉这次变更。
+   * 异常统一降级为返回文本，避免向上冒泡丢掉本轮其余工具结果。
    */
-export function handleManagementTool(ctx, toolName, args = {}) {
-    switch (toolName) {
-      case 'mgmt_cron_list':
-        if (!ctx._scheduler) return '调度器未配置';
-        const tasks = ctx._scheduler.listTasks() || [];
-        if (!tasks.length) return '无定时任务';
-        return tasks.map(t => `[${t.id}] ${t.name} (${t.cron})`).join('\n');
+export async function handleManagementTool(ctx, toolName, args = {}) {
+    try {
+      switch (toolName) {
+        case 'mgmt_cron_list': {
+          if (!ctx._scheduler) return '调度器未配置';
+          const tasks = ctx._scheduler.listTasks() || [];
+          if (!tasks.length) return '无定时任务';
+          return tasks.map(t => `[${t.id}] ${t.name} (${t.cron})`).join('\n');
+        }
 
-      case 'mgmt_cron_add':
-        if (!ctx._scheduler) return '调度器未配置';
-        const taskConfig = {
-          id: args.task_id,
-          name: args.name,
-          cron: args.cron,
-          prompt: args.description,
-          enabled: true,
-        };
-        ctx._scheduler.register(args.task_id, args.cron, async () => {
-          if (ctx._onCronTaskExecute) {
-            await ctx._onCronTaskExecute(args.description, taskConfig);
-          } else {
-            console.warn(`[CoreAgent] Cron task ${args.task_id} fired but no executor set`);
+        case 'mgmt_cron_add': {
+          if (!ctx._scheduler) return '调度器未配置';
+
+          const taskId = String(args.task_id ?? '').trim();
+          const cronExpr = String(args.cron ?? '').trim();
+          if (!taskId) return '缺少 task_id，无法创建定时任务';
+          // 与前端 webui/src/lib/cron.js 同口径：只接受 5 段，
+          // 拒绝 node-cron v4 的 6 段（带秒）写法，否则前端保存会报错、任务还会按秒跑
+          if (!isValidCron(cronExpr)) return cronValidationError(cronExpr);
+
+          // 覆盖同名任务要显式告知，否则模型以为「新建成功」，
+          // 而用户视角是原任务被静默替换
+          const overwritten = typeof ctx._scheduler.has === 'function'
+            && ctx._scheduler.has(taskId);
+
+          const taskConfig = {
+            id: taskId,
+            name: args.name,
+            cron: cronExpr,
+            prompt: args.description,
+            enabled: true,
+          };
+          ctx._scheduler.register(taskId, cronExpr, async () => {
+            if (ctx._onCronTaskExecute) {
+              await ctx._onCronTaskExecute(args.description, taskConfig);
+            } else {
+              console.warn(`[CoreAgent] Cron task ${taskId} fired but no executor set`);
+            }
+          }, { name: args.name, prompt: args.description });
+
+          if (ctx._onCronTasksChanged) {
+            await ctx._onCronTasksChanged();
           }
-        }, { name: args.name, prompt: args.description });
-        if (ctx._onCronTasksChanged) {
-          ctx._onCronTasksChanged();
+          return overwritten
+            ? `已覆盖同名定时任务: ${taskId}（${cronExpr}，原配置已被替换）`
+            : `已添加定时任务: ${taskId}（${cronExpr}）`;
         }
-        return `已添加定时任务: ${args.task_id}`;
 
-      case 'mgmt_cron_remove':
-        if (!ctx._scheduler) return '调度器未配置';
-        ctx._scheduler.unregister(args.task_id);
-        if (ctx._onCronTasksChanged) {
-          ctx._onCronTasksChanged();
+        case 'mgmt_cron_remove': {
+          if (!ctx._scheduler) return '调度器未配置';
+          ctx._scheduler.unregister(args.task_id);
+          if (ctx._onCronTasksChanged) {
+            await ctx._onCronTasksChanged();
+          }
+          return `已删除定时任务: ${args.task_id}`;
         }
-        return `已删除定时任务: ${args.task_id}`;
 
-      case 'mgmt_cron_toggle':
-        if (!ctx._scheduler) return '调度器未配置';
-        let toggleResult = '';
-        if (args.enabled) {
-          const ok = ctx._scheduler.enable(args.task_id);
-          toggleResult = ok ? `已启用任务: ${args.task_id}` : `任务 ${args.task_id} 不存在，无法启用`;
-        } else {
-          const ok = ctx._scheduler.disable(args.task_id);
-          toggleResult = ok ? `已禁用任务: ${args.task_id}` : `任务 ${args.task_id} 不存在，无法禁用`;
+        case 'mgmt_cron_toggle': {
+          if (!ctx._scheduler) return '调度器未配置';
+          let toggleResult = '';
+          if (args.enabled) {
+            const ok = ctx._scheduler.enable(args.task_id);
+            toggleResult = ok ? `已启用任务: ${args.task_id}` : `任务 ${args.task_id} 不存在，无法启用`;
+          } else {
+            const ok = ctx._scheduler.disable(args.task_id);
+            toggleResult = ok ? `已禁用任务: ${args.task_id}` : `任务 ${args.task_id} 不存在，无法禁用`;
+          }
+          if (ctx._onCronTasksChanged) {
+            await ctx._onCronTasksChanged();
+          }
+          return toggleResult;
         }
-        if (ctx._onCronTasksChanged) {
-          ctx._onCronTasksChanged();
-        }
-        return toggleResult;
 
-      case 'mgmt_heartbeat_get':
-        if (!ctx._heartbeat) return '心跳未配置';
-        return ctx._heartbeat.getTaskContent() || '';
+        case 'mgmt_heartbeat_get':
+          if (!ctx._heartbeat) return '心跳未配置';
+          return ctx._heartbeat.getTaskContent() || '';
 
-      case 'mgmt_heartbeat_set':
-        if (!ctx._heartbeat) return '心跳未配置';
-        ctx._heartbeat.setTaskContent(args.content);
-        return '已更新心跳任务';
+        case 'mgmt_heartbeat_set':
+          if (!ctx._heartbeat) return '心跳未配置';
+          ctx._heartbeat.setTaskContent(args.content);
+          return '已更新心跳任务';
 
-      default:
-        return `未知管理工具: ${toolName}`;
+        default:
+          return `未知管理工具: ${toolName}`;
+      }
+    } catch (e) {
+      return `管理工具执行错误: ${e.message}`;
     }
   }
 
