@@ -133,6 +133,9 @@ class SmartHomeAgent {
     // 8. 初始化 WebUI 服务
     if (this.config.plugins?.webui?.enabled) {
       this.webui = new WebUIService(this.config.plugins.webui, this);
+      // 注册为消息渠道：心跳告警 / 定时任务结果的 messenger.broadcast()
+      // 会同时推送到 WebUI 当前会话（SSE 实时 + 写入会话历史）
+      this.messenger.register('webui', this.webui);
     }
 
     console.log('[Agent] Initialized');

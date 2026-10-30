@@ -158,10 +158,122 @@ class WebUIService {
     this.agentInstance = agentInstance;
     this.app = express();
 
+    // GET /api/events 的长连接（心跳告警等异步通知的实时推送通道）
+    this._sseClients = new Set();
+    // 最近一次交互的 WebUI 会话：异步通知要落到「当前会话」而不是某个固定 id
+    this._activeSessionId = null;
+    this._eventSeq = 0;
+
     this.app.use(cors());
     this.app.use(express.json());
 
     this.setupRoutes();
+  }
+
+  /**
+   * 记录当前活跃的 WebUI 会话（异步通知的投递目标）
+   */
+  touchSession(sessionId) {
+    if (sessionId) this._activeSessionId = sessionId;
+  }
+
+  /**
+   * 解析异步通知要投递的会话
+   *
+   * `_activeSessionId` 只存在于内存中，`node --watch` 每次改后端代码都会重启进程、
+   * 清空它；而浏览器页面不会因为服务端重启就重新拉一次历史。
+   * 这时若直接放弃，告警既推不进会话也不会落盘。兜底扫描 sessions/ 目录，
+   * 取最近修改的 webui_*.json（备份文件除外）作为当前会话。
+   */
+  async resolveSessionId() {
+    if (this._activeSessionId) return this._activeSessionId;
+
+    const coreAgent = this.agentInstance?.agent;
+    const dir = coreAgent?.sessionDir;
+    if (!dir) return null;
+
+    try {
+      const files = await fs.readdir(dir);
+      let newest = null;
+      let newestAt = 0;
+      for (const file of files) {
+        if (!file.startsWith('webui_') || !file.endsWith('.json') || file.includes('_backup_')) continue;
+        const stat = await fs.stat(path.join(dir, file));
+        if (stat.mtimeMs > newestAt) {
+          newestAt = stat.mtimeMs;
+          newest = file;
+        }
+      }
+      if (newest) {
+        this._activeSessionId = newest.replace(/\.json$/, '');
+        console.log(`[WebUI] Resolved active session from disk: ${this._activeSessionId}`);
+      }
+      return this._activeSessionId;
+    } catch (e) {
+      console.warn('[WebUI] Failed to resolve active session:', e.message);
+      return null;
+    }
+  }
+
+  /**
+   * 把一条系统消息写入会话历史
+   *
+   * 只走 SSE 是不够的：用户刷新页面后事件流已经过去，告警就消失了。
+   * 所以同时落进 coreAgent 的会话历史，刷新后仍能在会话里看到。
+   */
+  async appendSystemMessage(text, sessionId) {
+    const coreAgent = this.agentInstance?.agent;
+    if (!coreAgent) return null;
+
+    const targetSession = sessionId || await this.resolveSessionId();
+    if (!targetSession) return null;
+
+    if (!coreAgent._sessions) coreAgent._sessions = {};
+    if (!coreAgent._sessions[targetSession]) {
+      coreAgent._sessions[targetSession] = await coreAgent._loadSession(targetSession);
+    }
+
+    const history = coreAgent._sessions[targetSession] || [];
+    history.push({ role: 'system', content: text });
+    coreAgent._sessions[targetSession] = history;
+
+    if (typeof coreAgent._saveSession === 'function') {
+      await coreAgent._saveSession(targetSession, history);
+    }
+    return targetSession;
+  }
+
+  /**
+   * 向所有已连接的浏览器推送事件（SSE）
+   */
+  pushEvent(payload) {
+    const data = `data: ${JSON.stringify({ id: ++this._eventSeq, ts: Date.now(), ...payload })}\n\n`;
+    for (const client of this._sseClients) {
+      try {
+        client.write(data);
+      } catch (e) {
+        this._sseClients.delete(client);
+      }
+    }
+  }
+
+  /**
+   * MessengerBridge 渠道接口
+   *
+   * 注册到 messenger 后，心跳告警等 messenger.broadcast() 的广播
+   * 会同时进入 WebUI 当前会话（实时推送 + 写入历史）。
+   */
+  async broadcast(text) {
+    try {
+      const sessionId = await this.appendSystemMessage(text);
+      this.pushEvent({ type: 'notice', content: text, sessionId });
+      // 排障关键信息：有没有浏览器在线、落到了哪个会话
+      console.log(`[WebUI] Broadcast → session=${sessionId || '(none)'}, clients=${this._sseClients.size}`);
+      return true;
+    } catch (e) {
+      console.error('[WebUI] broadcast failed:', e.message);
+      return false;
+    }
   }
 
   setupRoutes() {
@@ -454,6 +566,18 @@ class WebUIService {
       } catch (err) { res.status(500).json({ error: err.message }); }
     });
 
+    // 手动触发一次巡检（调试用）：不必等 interval 到点就能验证
+    // 「识别 → 广播 → web/飞书」整条链路
+    this.app.post('/api/heartbeat/trigger', (req, res) => {
+      const heartbeat = this.agentInstance?.heartbeat;
+      if (!heartbeat || typeof heartbeat.trigger !== 'function') {
+        return res.status(501).json({ success: false, error: '心跳未配置' });
+      }
+      // 立即返回：巡检要跑 LLM，可能耗时数十秒
+      res.json({ success: true, triggering: true, clients: this._sseClients.size });
+      heartbeat.trigger().catch(err => console.error('[WebUI] Manual heartbeat failed:', err.message));
+    });
+
     this.app.post('/api/heartbeat', async (req, res) => {
       try {
         const p = path.join(process.cwd(), 'config', 'heartbeat.yaml');
@@ -705,10 +829,43 @@ class WebUIService {
         }
 
         const history = coreAgent._sessions[sessionId] || [];
+        this.touchSession(sessionId);
         res.json({ history: buildDisplayHistory(history) });
       } catch (err) {
         res.status(500).json({ error: err.message });
       }
+    });
+
+    // ──────────────────────────────────────────
+    // 实时事件流（SSE）
+    //
+    // /api/chat 是「一问一答」的流式响应，无法承载心跳告警这类旁路通知。
+    // 这里维护一条浏览器长连接，服务端有异步消息时主动下发。
+    // ──────────────────────────────────────────
+    this.app.get('/api/events', (req, res) => {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.flushHeaders?.();
+      res.write(': connected\n\n');
+
+      this._sseClients.add(res);
+      console.log(`[WebUI] Event stream connected (${this._sseClients.size} client(s))`);
+
+      // 心跳保活，避免代理/浏览器把空闲连接掐掉
+      const ping = setInterval(() => {
+        try { res.write(': ping\n\n'); } catch (e) { /* 连接已断，close 回调会清理 */ }
+      }, 25000);
+
+      const cleanup = () => {
+        clearInterval(ping);
+        if (this._sseClients.delete(res)) {
+          console.log(`[WebUI] Event stream closed (${this._sseClients.size} client(s))`);
+        }
+      };
+      req.on('close', cleanup);
+      res.on('close', cleanup);
     });
 
     // ──────────────────────────────────────────
@@ -718,6 +875,9 @@ class WebUIService {
       try {
         const { message, sessionId, stream } = req.body;
         if (!message) return res.status(400).json({ error: 'Message is required' });
+
+        // 记住当前会话，异步通知（心跳告警等）投递到这里
+        this.touchSession(sessionId || 'webui_default');
 
         // 设置 SSE 响应头
         res.setHeader('Content-Type', 'text/event-stream');
@@ -795,6 +955,9 @@ class WebUIService {
     if (!this.server) return;
     const server = this.server;
     this.server = null;
+
+    // 主动丢弃事件流客户端，避免重启后继续往已断开的连接写数据
+    this._sseClients.clear();
 
     // 必须等到 close 回调：软重启会立刻在原端口重新 listen，
     // 只调用 close() 而不等待会导致新服务拿到 EADDRINUSE。

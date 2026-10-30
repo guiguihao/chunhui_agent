@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, memo } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react'
 import { Send, User, Bot, Plus, Cpu, ChevronDown, ChevronUp, CheckCircle2, Loader2 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -266,25 +266,63 @@ export default function SessionView() {
     scrollToBottom()
   }, [messages])
 
-  useEffect(() => {
-    // 加载历史会话
-    fetch(`/api/chat/history?sessionId=${sessionId}`)
-      .then(res => res.json())
-      .then(data => {
-        if (data.history && data.history.length > 0) {
-          // 历史记录里的 tools 必须保留：后端已把 assistant.tool_calls 与
-          // 对应的 role=tool 结果组装好，丢弃的话刷新后就只剩气泡、
-          // 与流式时的工具卡片不一致
-          const mapped = data.history.map(m => ({
-            ...m,
-            isThinkingFinished: true,
-            tools: m.tools || []
-          }));
-          setMessages(mapped)
-        }
-      })
-      .catch(err => console.error('Failed to load chat history:', err))
+  const loadHistory = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/chat/history?sessionId=${sessionId}`)
+      const data = await res.json()
+      if (data.history && data.history.length > 0) {
+        // 历史记录里的 tools 必须保留：后端已把 assistant.tool_calls 与
+        // 对应的 role=tool 结果组装好，丢弃的话刷新后就只剩气泡、
+        // 与流式时的工具卡片不一致
+        setMessages(data.history.map(m => ({
+          ...m,
+          isThinkingFinished: true,
+          tools: m.tools || []
+        })))
+      }
+    } catch (err) {
+      console.error('Failed to load chat history:', err)
+    }
   }, [sessionId])
+
+  // 流式进行中不要用历史覆盖本地状态，否则会冲掉正在生成的消息
+  const typingRef = useRef(false)
+  useEffect(() => { typingRef.current = isTyping }, [isTyping])
+
+  useEffect(() => {
+    loadHistory()
+  }, [loadHistory])
+
+  useEffect(() => {
+    // 服务端异步通知（如心跳巡检告警）：/api/chat 是一问一答的流，承载不了
+    // 旁路消息，这里用一条 SSE 长连接实时把通知追加进当前会话
+    if (typeof EventSource === 'undefined') return
+
+    const source = new EventSource('/api/events')
+    let connected = false
+
+    source.onopen = () => {
+      // 断线重连（服务端 --watch 重启、网络抖动）期间推送会丢：补拉一次历史
+      if (connected && !typingRef.current) loadHistory()
+      connected = true
+    }
+
+    source.onmessage = (e) => {
+      let event
+      try { event = JSON.parse(e.data) } catch { return }
+      if (!event?.content) return
+      // 后端按「最近交互的会话」投递，别的标签页/会话的通知不要串进来
+      if (event.sessionId && event.sessionId !== sessionId) return
+      setMessages(prev => [...prev, {
+        id: `event_${event.id ?? Date.now()}`,
+        role: 'system',
+        content: event.content,
+      }])
+    }
+    // onerror 无需处理：EventSource 会自动重连（服务重启后也能接回来）
+
+    return () => source.close()
+  }, [sessionId, loadHistory])
 
   const handleSend = async () => {
     if (!input.trim() || isTyping) return

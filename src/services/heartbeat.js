@@ -4,6 +4,48 @@ import { toSessionId } from './coreagent.js';
 /** 动态巡检项的名称（由 AI 通过 mgmt_heartbeat_set 配置） */
 export const DYNAMIC_CHECK_NAME = '动态巡检';
 
+/** 宽松真值判断：模型可能给出 true / "true" / 1 */
+const isTrue = (v) => v === true || v === 1 || (typeof v === 'string' && v.trim().toLowerCase() === 'true');
+
+/**
+ * 从决策结果里取出警告载荷
+ *
+ * 只读 result.is_warning 是不够的：模型常把 JSON 包在 ```json 代码块里，
+ * 后面再跟一段自然语言说明，此时 CoreAgent.parseOutput() 的 JSON.parse 会失败、
+ * 退化成 { response: 原文 }，警告标志就埋在字符串里 —— 告警永远触发不了。
+ * 这里把围栏内容与整段文本都尝试解析一遍，仍失败则返回 null。
+ */
+export function extractWarningPayload(result) {
+  if (!result || typeof result !== 'object') return null;
+
+  // 已经是扁平对象（模型直接返回纯 JSON）
+  if (result.is_warning !== undefined || result.alert !== undefined || result.level !== undefined) {
+    return result;
+  }
+
+  const text = [result.response, result.reply, result.content]
+    .filter(t => typeof t === 'string' && t.trim())
+    .join('\n');
+  if (!text) return null;
+
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidates = [fenced?.[1], text];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const start = candidate.indexOf('{');
+    const end = candidate.lastIndexOf('}');
+    if (start === -1 || end <= start) continue;
+    try {
+      const parsed = JSON.parse(candidate.slice(start, end + 1));
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch {
+      // 继续尝试下一个候选
+    }
+  }
+  return null;
+}
+
 /**
  * 心跳机制
  * 定期执行系统自检和环境优化检查
@@ -144,12 +186,21 @@ class Heartbeat {
         });
         console.log(`[Heartbeat] ${check.name} result:`, result);
 
-        // 警告检测
-        if (result && (result.is_warning === true || result.alert === true || result.level === 'error' || result.level === 'warning')) {
-          const warningMsg = result.reply || result.response || result.content || `检测到异常: ${check.name}`;
-          console.warn(`[Heartbeat] ⚠️ Warning in ${check.name}: ${warningMsg}`);
-          if (this.onWarning) {
-            await this.onWarning(warningMsg, result);
+        // 警告检测：结果可能是扁平对象，也可能是「代码块 JSON + 说明文字」的文本，
+        // 统一先抽取出载荷再判断，否则 is_warning 藏在字符串里永远判不出来
+        const payload = extractWarningPayload(result);
+        if (payload) {
+          const level = String(payload.level || '').toLowerCase();
+          const isWarning = isTrue(payload.is_warning) || isTrue(payload.alert)
+            || level === 'error' || level === 'warning';
+
+          if (isWarning) {
+            const warningMsg = payload.reply || payload.response || payload.content
+              || payload.message || `检测到异常: ${check.name}`;
+            console.warn(`[Heartbeat] ⚠️ Warning in ${check.name}: ${warningMsg}`);
+            if (this.onWarning) {
+              await this.onWarning(warningMsg, payload);
+            }
           }
         }
       } else if (this.agent && typeof this.agent.runBackgroundTask === 'function') {
