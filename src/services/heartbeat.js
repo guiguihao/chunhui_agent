@@ -1,11 +1,64 @@
 import cron from 'node-cron';
 import { toSessionId } from './coreagent.js';
+import { isValidCron, cronValidationError } from './cron-utils.js';
 
 /** 动态巡检项的名称（由 AI 通过 mgmt_heartbeat_set 配置） */
 export const DYNAMIC_CHECK_NAME = '动态巡检';
 
 /** 宽松真值判断：模型可能给出 true / "true" / 1 */
 const isTrue = (v) => v === true || v === 1 || (typeof v === 'string' && v.trim().toLowerCase() === 'true');
+
+/**
+ * 检查项是否启用
+ *
+ * 历史配置里没有 enabled 字段，必须默认启用（`!== false`），
+ * 不能写成 `=== true`，否则老配置升级后全部静默不跑。
+ */
+export const isCheckEnabled = (check) => !check || check.enabled !== false;
+
+/**
+ * 抽取告警的完整正文
+ *
+ * 模型的典型返回是「```json {...}``` + 一段说明文字」，真正的分析在 JSON 之外。
+ * 只广播 payload.reply 时，前端就只剩一句简短结论（如「测试：…功能正常」），
+ * 核查结论、异常清单这些主体内容全部丢失，这里把正文一并取出来。
+ *
+ * @param {object|string} result - decide() 的返回
+ * @param {string} summary - 已经取出的简短结论，用于去重
+ * @returns {string} 可读正文；没有额外内容时返回 ''
+ */
+export function extractWarningDetail(result, summary = '') {
+  const parts = [];
+  if (typeof result === 'string') {
+    parts.push(result);
+  } else if (result && typeof result === 'object') {
+    for (const field of ['response', 'content', 'reply']) {
+      if (typeof result[field] === 'string' && result[field].trim()) parts.push(result[field]);
+    }
+  }
+
+  const prose = parts
+    .join('\n\n')
+    // 去掉 JSON 围栏：载荷已经解析出来了，正文不需要再贴一遍
+    .replace(/```(?:json)?[\s\S]*?```/gi, ' ')
+    .trim();
+
+  if (!prose) return '';
+
+  // 整段就是 JSON 时没有可读正文
+  if (prose.startsWith('{')) {
+    try {
+      JSON.parse(prose);
+      return '';
+    } catch {
+      // 混合文本，保留
+    }
+  }
+
+  const summaryText = String(summary || '').trim();
+  if (summaryText && prose === summaryText) return '';
+  return prose;
+}
 
 /**
  * 从决策结果里取出警告载荷
@@ -62,6 +115,8 @@ class Heartbeat {
     this.agent = agent;
     this.enabled = config.enabled !== false;
     this.interval = config.interval || '*/5 * * * *'; // 全局默认 interval
+    // 与 Scheduler 共用可配置时区，避免两处硬编码各自漂移
+    this.timezone = config.timezone || 'Asia/Shanghai';
     this.checks = config.checks || [];
     this.tasks = [];            // 静态检查项任务列表
     this.dynamicTask = null;    // 动态巡检任务
@@ -116,13 +171,41 @@ class Heartbeat {
   }
 
   /**
+   * 解析单个检查项实际生效的 interval
+   *
+   * 单项 interval 为空 → 用全局；单项非法 → 回退全局而不是抛错，
+   * 否则一条坏配置会让 start() 中断，后面所有检查项都不再调度。
+   *
+   * @param {object} check
+   * @returns {{ interval: string, fallback: boolean }}
+   */
+  _resolveCheckInterval(check) {
+    const raw = String(check?.interval ?? '').trim();
+    if (!raw) return { interval: this.interval, fallback: false };
+    if (isValidCron(raw)) return { interval: raw, fallback: false };
+    return {
+      interval: isValidCron(this.interval) ? this.interval : '',
+      fallback: true,
+    };
+  }
+
+  /**
    * 启动心跳
-   * 每个 check 使用自己的 interval，若未设置则使用全局 interval
+   * 每个 check 使用自己的 interval（未设置则用全局），enabled:false 的检查项不调度
    */
   start() {
     if (!this.enabled) {
       console.log('[Heartbeat] Disabled, skipping...');
       return;
+    }
+
+    // 全局 interval 同样会被直接喂给 node-cron（静态项继承 + 动态巡检），
+    // 不校验的话一个非法值就会抛穿 start() → 整个 Agent 启动失败；
+    // 且 6 段表达式能跑但不能在 WebUI 保存，必须统一到 isValidCron 口径
+    const rawGlobalInterval = String(this.interval || '').trim();
+    if (!isValidCron(rawGlobalInterval)) {
+      console.warn(`[Heartbeat] 全局 interval 非法 (${rawGlobalInterval}) ${cronValidationError(rawGlobalInterval)}，已回退到 */5 * * * *`);
+      this.interval = '*/5 * * * *';
     }
 
     console.log(`[Heartbeat] Starting (default interval: ${this.interval})`);
@@ -134,13 +217,29 @@ class Heartbeat {
       console.warn(`[Heartbeat] ⚠️ Duplicate check names: ${[...new Set(duplicates)].join(', ')} — 请在 heartbeat.yaml 中改为唯一 id/name，否则它们共享会话且无法并行`);
     }
 
+    let disabled = 0;
+
     for (const check of this.checks) {
-      const checkInterval = check.interval || this.interval;
+      if (!isCheckEnabled(check)) {
+        disabled += 1;
+        console.log(`[Heartbeat] Skip "${check.name}": disabled`);
+        continue;
+      }
+
+      const { interval: checkInterval, fallback } = this._resolveCheckInterval(check);
+      if (!checkInterval) {
+        console.warn(`[Heartbeat] Skip "${check.name}": interval 非法 (${check.interval})，且全局 interval 也不可用`);
+        continue;
+      }
+      if (fallback) {
+        console.warn(`[Heartbeat] "${check.name}" interval 非法 (${check.interval}) ${cronValidationError(check.interval)}，已回退到全局 ${checkInterval}`);
+      }
 
       const task = cron.schedule(checkInterval, async () => {
         await this._runCheck(check);
       }, {
-        timezone: 'Asia/Shanghai',
+        // 与 Scheduler 共用可配置时区，避免两处硬编码各自漂移
+        timezone: this.timezone,
       });
 
       this.tasks.push(task);
@@ -153,7 +252,7 @@ class Heartbeat {
       console.log(`[Heartbeat] Scheduled "${DYNAMIC_CHECK_NAME}" (${this.interval})`);
     }
 
-    console.log(`[Heartbeat] Started (${this.tasks.length} static + ${this.dynamicTask ? 1 : 0} dynamic check task(s))`);
+    console.log(`[Heartbeat] Started (${this.tasks.length} static + ${this.dynamicTask ? 1 : 0} dynamic check task(s)${disabled ? `, ${disabled} disabled` : ''})`);
   }
 
   /**
@@ -181,7 +280,8 @@ class Heartbeat {
     return cron.schedule(this.interval, async () => {
       await this._runCheck({ name: DYNAMIC_CHECK_NAME, prompt: content });
     }, {
-      timezone: 'Asia/Shanghai',
+      // 与静态检查项、Scheduler 保持同一时区来源
+      timezone: this.timezone,
     });
   }
 
@@ -198,6 +298,12 @@ class Heartbeat {
    * 执行单个检查项
    */
   async _runCheck(check) {
+    // 手动 trigger / beat() 也要尊重 enabled，否则 UI 上关掉的检查项仍会被执行
+    if (!isCheckEnabled(check)) {
+      console.log(`[Heartbeat] Skip "${check.name || 'default'}": disabled`);
+      return;
+    }
+
     // 互斥键与会话键优先用稳定 id：重名检查项不该共享会话、也不该互相吞掉触发
     const checkKey = check.id || check.name || 'default';
 
@@ -233,9 +339,14 @@ class Heartbeat {
           if (isWarning) {
             const warningMsg = payload.reply || payload.response || payload.content
               || payload.message || `检测到异常: ${check.name}`;
+            // 正文（模型写在 JSON 之外的部分）一起交给广播层，否则前端只有一句结论
+            const detail = extractWarningDetail(result, warningMsg);
             console.warn(`[Heartbeat] ⚠️ Warning in ${check.name}: ${warningMsg}`);
             if (this.onWarning) {
-              await this.onWarning(warningMsg, payload);
+              await this.onWarning(warningMsg, payload, {
+                check: check.name,
+                detail: detail === warningMsg ? '' : detail,
+              });
             }
           }
         }
@@ -256,6 +367,10 @@ class Heartbeat {
   async beat() {
     console.log('[Heartbeat] Beat...');
     for (const check of this.checks) {
+      if (!isCheckEnabled(check)) {
+        console.log(`[Heartbeat] Skip "${check.name}": disabled`);
+        continue;
+      }
       await this._runCheck(check);
     }
     const content = (this.taskContent || '').trim();
@@ -310,12 +425,16 @@ class Heartbeat {
     const prevEnabled = this.enabled;
     const prevInterval = this.interval;
     const prevDynamic = this.taskContent;
+    const prevChecksSig = JSON.stringify(this.checks);
 
-    const checksChanged = Boolean(config.checks) && config.checks !== this.checks;
+    // 按内容比较而不是按引用：WebUI 每次保存都会传新数组，
+    // 只需重建一次；而「仅改某项 enabled/interval」也必须识别为变更
+    const checksChanged = Array.isArray(config.checks)
+      && JSON.stringify(config.checks) !== prevChecksSig;
 
     if (config.enabled !== undefined) this.enabled = config.enabled;
     if (config.interval) this.interval = config.interval;
-    if (config.checks) this.checks = config.checks;
+    if (Array.isArray(config.checks)) this.checks = config.checks;
     // 热更新时同步动态巡检内容（WebUI 会回传该字段）
     if (config.dynamic_prompt !== undefined) this.taskContent = config.dynamic_prompt || '';
 

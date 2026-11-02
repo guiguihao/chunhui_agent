@@ -45,8 +45,3 @@ cron:
       cron: 29 15 * * *
       enabled: false
       prompt: 每日天气早报：调用 weather 技能查询杭州当天天气与未来趋势，整理成简明早报（温度、体感、降水、风力、穿衣/开窗/空调建议），推送给主人。
-    - id: test_ok_1533
-      name: 测试发送ok
-      cron: 35 15 * * *
-      enabled: false
-      prompt: 向主人发送一条消息，内容只有：ok

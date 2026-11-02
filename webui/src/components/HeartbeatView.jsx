@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Save, RefreshCw, Plus, Trash2, Heart } from 'lucide-react'
 import { useLanguage } from './LanguageContext'
 import { isValidCron } from '../lib/cron'
+import CronBuilder from './CronBuilder'
 import './PanelView.css'
 
 // 检查项用本地稳定 _key 做 React key（name 可编辑且允许重复），提交前剥离
@@ -15,10 +16,15 @@ export default function HeartbeatView() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving]   = useState(false)
   const [saveMsg, setSaveMsg] = useState('')
+  // 哪些检查项开了「独立间隔」：不能直接看 interval 是否为空来判断，
+  // 否则用户在可视化选择器里清空数值的瞬间，整个选择器会被卸载
+  const [overrides, setOverrides] = useState(() => new Set())
 
   useEffect(() => {
     fetch('/api/heartbeat').then(r => r.json()).then(d => {
-      setHb({ ...d, checks: withKeys(d.checks) })
+      const checks = withKeys(d.checks)
+      setHb({ ...d, checks })
+      setOverrides(new Set(checks.filter(c => c.interval).map(c => c._key)))
       setLoading(false)
     })
   }, [])
@@ -29,6 +35,19 @@ export default function HeartbeatView() {
     if (!isValidCron(hb.interval)) {
       setSaveMsg(`${t('save_err')}${t('hb_interval')} — ${t('cron_invalid')}`)
       return
+    }
+    // 单项 interval 可留空（继承全局），填了就必须合法
+    for (const chk of hb.checks || []) {
+      const iv = (chk.interval || '').trim()
+      // 开了「独立间隔」却没算出表达式（选择器输入不完整）时，不能静默降级成继承
+      if (overrides.has(chk._key) && !iv) {
+        setSaveMsg(`${t('save_err')}${t('hb_check_interval')} (${chk.name || t('hb_name')}) — ${t('cron_err_interval')}`)
+        return
+      }
+      if (iv && !isValidCron(iv)) {
+        setSaveMsg(`${t('save_err')}${t('hb_check_interval')} (${chk.name || t('hb_name')}) — ${t('cron_invalid')}`)
+        return
+      }
     }
     setSaving(true); setSaveMsg('')
     try {
@@ -43,8 +62,29 @@ export default function HeartbeatView() {
   const updateCheck = (key, field, val) =>
     setHb(prev => ({ ...prev, checks: (prev.checks || []).map(c => c._key === key ? { ...c, [field]: val } : c) }))
 
-  const addCheck = () => setHb(prev => ({ ...prev, checks: [...(prev.checks || []), { _key: nextKey(), name: '', prompt: '' }] }))
-  const removeCheck = (key) => setHb(prev => ({ ...prev, checks: (prev.checks || []).filter(c => c._key !== key) }))
+  const addCheck = () => setHb(prev => ({ ...prev, checks: [...(prev.checks || []), { _key: nextKey(), name: '', prompt: '', enabled: true, interval: '' }] }))
+  const removeCheck = (key) => {
+    setHb(prev => ({ ...prev, checks: (prev.checks || []).filter(c => c._key !== key) }))
+    setOverrides(prev => {
+      const next = new Set(prev)
+      next.delete(key)
+      return next
+    })
+  }
+
+  const toggleOverride = (key) => {
+    const enabled = !overrides.has(key)
+    setOverrides(prev => {
+      const next = new Set(prev)
+      if (enabled) next.add(key)
+      else next.delete(key)
+      return next
+    })
+    updateCheck(key, 'interval', enabled ? (hb.interval || '*/5 * * * *') : '')
+  }
+
+  const checkList = hb.checks || []
+  const enabledCount = checkList.filter(c => c.enabled !== false).length
 
   if (loading) return <div className="panel-loading"><RefreshCw size={20} className="spin" /> {t('btn_saving')}</div>
 
@@ -53,7 +93,7 @@ export default function HeartbeatView() {
       <header className="view-header flex-between">
         <div>
           <h1 className="view-title">{t('hb_title')}</h1>
-          <p className="view-subtitle">{t('hb_subtitle', { count: hb.checks?.length || 0 })}</p>
+          <p className="view-subtitle">{t('hb_subtitle', { active: enabledCount, total: checkList.length })}</p>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           {saveMsg && <span className={`save-msg ${saveMsg.startsWith('✓') || saveMsg.includes('成功') ? 'ok' : 'err'}`}>{saveMsg}</span>}
@@ -84,8 +124,12 @@ export default function HeartbeatView() {
             </div>
             <div className="form-group flex-1">
               <label className="form-label">{t('hb_interval')}</label>
-              <input className="form-input" value={hb.interval} onChange={e => setHb({...hb, interval: e.target.value})} placeholder="*/10 * * * *" />
-              <span className="form-hint">{t('hb_interval_hint')}</span>
+              <CronBuilder
+                value={hb.interval}
+                onChange={interval => setHb(prev => ({ ...prev, interval }))}
+                defaultMode="interval"
+                compact
+              />
             </div>
           </div>
         </div>
@@ -96,20 +140,60 @@ export default function HeartbeatView() {
             <h2 className="card-title" style={{ margin: 0, border: 'none', padding: 0 }}>{t('hb_check_items')}</h2>
             <button className="btn-text" onClick={addCheck}><Plus size={14} /> {t('btn_add_check')}</button>
           </div>
-          {(hb.checks || []).length === 0 && <div className="panel-empty">{t('hb_empty')}</div>}
-          {(hb.checks || []).map(chk => (
-            <div key={chk._key} className="check-item">
-              <div className="form-row" style={{ marginBottom: 0 }}>
+          {checkList.length === 0 && <div className="panel-empty">{t('hb_empty')}</div>}
+          {checkList.map(chk => (
+            <div key={chk._key} className={`check-item ${chk.enabled === false ? 'disabled' : ''}`}>
+              <div className="form-row" style={{ marginBottom: 0, alignItems: 'flex-end' }}>
                 <div className="form-group flex-1">
                   <label className="form-label">{t('hb_name')}</label>
                   <input className="form-input" value={chk.name} onChange={e => updateCheck(chk._key,'name',e.target.value)} placeholder={t('hb_name_placeholder')} />
                 </div>
-                <button className="icon-btn danger" style={{ marginTop: 24 }} onClick={() => removeCheck(chk._key)}><Trash2 size={15}/></button>
+                <div className="form-group" style={{ minWidth: 150 }}>
+                  <label className="form-label">{t('hb_check_interval')}</label>
+                  <div className="toggle-row">
+                    <label className="toggle-switch">
+                      <input
+                        type="checkbox"
+                        checked={overrides.has(chk._key)}
+                        onChange={() => toggleOverride(chk._key)}
+                      />
+                      <span className="slider"></span>
+                    </label>
+                    <span className="form-hint">
+                      {overrides.has(chk._key) ? t('hb_check_interval_custom') : t('hb_check_interval_hint')}
+                    </span>
+                  </div>
+                </div>
+                <div className="form-group" style={{ minWidth: 90 }}>
+                  <label className="form-label">{t('hb_enabled')}</label>
+                  <div className="toggle-row">
+                    <label className="toggle-switch">
+                      <input
+                        type="checkbox"
+                        checked={chk.enabled !== false}
+                        onChange={e => updateCheck(chk._key,'enabled',e.target.checked)}
+                      />
+                      <span className="slider"></span>
+                    </label>
+                    <span className="form-hint">{chk.enabled === false ? t('hb_disabled') : t('hb_active')}</span>
+                  </div>
+                </div>
+                <button className="icon-btn danger" style={{ marginBottom: 4 }} onClick={() => removeCheck(chk._key)}><Trash2 size={15}/></button>
               </div>
               <div className="form-group">
                 <label className="form-label">{t('hb_prompt')}</label>
                 <textarea className="form-input form-textarea" rows={3} value={chk.prompt} onChange={e => updateCheck(chk._key,'prompt',e.target.value)} placeholder={t('hb_prompt_placeholder')} />
               </div>
+              {overrides.has(chk._key) && (
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <CronBuilder
+                    value={chk.interval || ''}
+                    onChange={interval => updateCheck(chk._key, 'interval', interval)}
+                    defaultMode="interval"
+                    compact
+                  />
+                </div>
+              )}
             </div>
           ))}
         </div>

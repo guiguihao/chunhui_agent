@@ -302,7 +302,22 @@ class WebUIService {
         if (!policy) {
           return res.status(503).json({ error: 'File policy not available' });
         }
-        const verdict = policy.allowRead(rawPath);
+        // 兼容会话里出现的工作区相对路径（如 workspace/reports/daily.md）：
+        // 相对路径先按 workspace 解析；文件不存在时再按进程 CWD 解析一次。
+        // 两种解析结果都必须过同一套策略，越界的照样拒绝。
+        const cleanPath = String(rawPath).replace(/^file:\/\//i, '');
+        let verdict = policy.allowRead(cleanPath);
+
+        if (verdict.ok && !path.isAbsolute(cleanPath)) {
+          const exists = await fs.access(verdict.resolvedPath).then(() => true).catch(() => false);
+          if (!exists) {
+            const cwdVerdict = policy.allowRead(path.resolve(process.cwd(), cleanPath));
+            if (cwdVerdict.ok) {
+              const cwdExists = await fs.access(cwdVerdict.resolvedPath).then(() => true).catch(() => false);
+              if (cwdExists) verdict = cwdVerdict;
+            }
+          }
+        }
 
         if (!verdict.ok) {
           console.warn(`[WebUI] Blocked unauthorized file access attempt: ${verdict.resolvedPath} — ${verdict.reason}`);
@@ -317,10 +332,13 @@ class WebUIService {
         else if (ext === '.gif') contentType = 'image/gif';
         else if (ext === '.webp') contentType = 'image/webp';
         else if (ext === '.svg') contentType = 'image/svg+xml';
-        else if (ext === '.html') contentType = 'text/html';
-        else if (ext === '.json') contentType = 'application/json';
-        else if (ext === '.txt') contentType = 'text/plain';
-        else if (ext === '.md') contentType = 'text/markdown';
+        else if (ext === '.html' || ext === '.htm') contentType = 'text/html; charset=utf-8';
+        else if (ext === '.json') contentType = 'application/json; charset=utf-8';
+        else if (ext === '.pdf') contentType = 'application/pdf';
+        else if (ext === '.md' || ext === '.markdown') contentType = 'text/markdown; charset=utf-8';
+        else if (['.txt', '.log', '.csv', '.tsv', '.yaml', '.yml', '.py', '.js', '.mjs', '.sh'].includes(ext)) {
+          contentType = 'text/plain; charset=utf-8';
+        }
 
         try {
           const data = await fs.readFile(resolvedPath);
@@ -586,7 +604,13 @@ class WebUIService {
         res.json({
           enabled: parsed?.heartbeat?.enabled ?? true,
           interval: parsed?.heartbeat?.interval || '*/10 * * * *',
-          checks: parsed?.heartbeat?.checks || [],
+          // 老配置没有 enabled/interval 字段，这里补默认值，
+          // 前端表单才能正确显示「默认启用 / 继承全局间隔」
+          checks: (parsed?.heartbeat?.checks || []).map((c) => ({
+            ...c,
+            enabled: c?.enabled !== false,
+            interval: c?.interval || '',
+          })),
           // AI 维护的动态巡检指令，必须回传给前端，否则保存时会被抹除
           dynamic_prompt: parsed?.heartbeat?.dynamic_prompt || '',
         });
@@ -608,11 +632,42 @@ class WebUIService {
     this.app.post('/api/heartbeat', async (req, res) => {
       try {
         const p = path.join(process.cwd(), 'config', 'heartbeat.yaml');
+
+        // 先校验再落盘：heartbeat.yaml 是启动时直接调度的事实来源，
+        // 一条非法 cron 会让 node-cron 抛错、心跳整体停摆
+        const globalInterval = String(req.body.interval || '').trim();
+        // 与 /api/cron 对齐：空表达式同样是非法输入，不能静默保留旧值
+        // 后还返回 success（调用方会误以为已生效）
+        if (!isValidCron(globalInterval)) {
+          return res.status(400).json({
+            success: false,
+            error: `全局 interval 非法：${cronValidationError(globalInterval)}`,
+          });
+        }
+
+        const checks = [];
+        for (const raw of Array.isArray(req.body.checks) ? req.body.checks : []) {
+          const interval = String(raw?.interval || '').trim();
+          if (interval && !isValidCron(interval)) {
+            return res.status(400).json({
+              success: false,
+              error: `检查项「${raw?.name || '未命名'}」的 interval 非法：${cronValidationError(interval)}`,
+            });
+          }
+          const check = { ...raw };
+          delete check._key;
+          // 归一化：enabled 缺省为 true（老配置语义），interval 为空表示继承全局
+          check.enabled = raw?.enabled !== false;
+          if (interval) check.interval = interval;
+          else delete check.interval;
+          checks.push(check);
+        }
+
         const parsed = yaml.parse(await fs.readFile(p, 'utf8')) || {};
         if (!parsed.heartbeat) parsed.heartbeat = {};
         parsed.heartbeat.enabled = req.body.enabled;
-        parsed.heartbeat.interval = req.body.interval;
-        parsed.heartbeat.checks = req.body.checks || [];
+        if (globalInterval) parsed.heartbeat.interval = globalInterval;
+        parsed.heartbeat.checks = checks;
         // 保留 AI 维护的动态巡检指令（前端可能未提交该字段）
         if (req.body.dynamic_prompt !== undefined) {
           parsed.heartbeat.dynamic_prompt = req.body.dynamic_prompt;

@@ -173,6 +173,45 @@ describe('WebUI 端口重试', () => {
   });
 });
 
+describe('WebUI 心跳配置校验', () => {
+  const port = 18188;
+  let svc;
+  let base;
+  const cfgPath = new URL('../../config/heartbeat.yaml', import.meta.url);
+
+  before(async () => {
+    svc = new WebUIService({ port }, {});
+    await svc.start();
+    base = `http://127.0.0.1:${port}`;
+  });
+
+  after(async () => { await svc?.stop(); });
+
+  const post = (body) => fetch(`${base}/api/heartbeat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  test('空 interval 直接 400，且不改写配置文件', async () => {
+    const fs = await import('node:fs/promises');
+    const before = await fs.readFile(cfgPath, 'utf8');
+    const res = await post({ enabled: true, interval: '', checks: [] });
+    assert.equal(res.status, 400);
+    assert.equal((await fs.readFile(cfgPath, 'utf8')), before, '非法请求不应落盘');
+  });
+
+  test('检查项 interval 非法时 400', async () => {
+    const res = await post({
+      enabled: true,
+      interval: '*/5 * * * *',
+      checks: [{ name: 'x', prompt: 'p', interval: 'bad cron' }],
+    });
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, /检查项/);
+  });
+});
+
 describe('WebUI 端口可被重复绑定（软重启前提）', () => {
   test('stop() 后能在同一端口重新 start()', async () => {
     const port = PORT + 3;

@@ -11,6 +11,28 @@ const isTaskRunning = (data) => {
 };
 
 /**
+ * 合并「调度器快照」与「配置文件中的任务」
+ *
+ * saveCronTasks() 是按 listTasks() 全量重写 cron.yaml 的，而表达式非法等原因
+ * 注册失败的任务不会出现在快照里 —— 直接重写就会把它从配置中永久抹掉。
+ * 这里按 id 把配置里存在、快照里缺失的任务补回去，保证保存只增不减。
+ *
+ * @param {Array} listed - scheduler.listTasks() 的结果
+ * @param {Array} configured - config.cron.tasks
+ * @returns {Array} 合并后的任务列表（保持 listed 的顺序，补充项追加在后）
+ */
+export function mergeConfiguredTasks(listed = [], configured = []) {
+  const merged = [...listed];
+  const knownIds = new Set(merged.map(t => t.id));
+  for (const task of configured || []) {
+    if (!task || !task.id || knownIds.has(task.id)) continue;
+    merged.push(task);
+    knownIds.add(task.id);
+  }
+  return merged;
+}
+
+/**
  * Cron 定时任务调度
  * 根据 config/cron.yaml 配置执行定时任务
  */

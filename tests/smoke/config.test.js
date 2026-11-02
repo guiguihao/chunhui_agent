@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'yaml';
 import cron from 'node-cron';
+import { isValidCron } from '../../src/services/cron-utils.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const CONFIG = path.join(ROOT, 'config');
@@ -51,7 +52,9 @@ describe('Cron 表达式合法性', () => {
 
   test('heartbeat.yaml 的 interval 有效', async () => {
     const cfg = await load('heartbeat.yaml');
-    assert.ok(cron.validate(cfg.heartbeat.interval),
+    // 与 WebUI / 心跳服务同口径（5 段），不能用 node-cron 的 validate：
+    // 后者接受 6 段带秒表达式，会造成「冒烟通过、保存被拒」
+    assert.ok(isValidCron(cfg.heartbeat.interval),
       `heartbeat interval 非法: ${cfg.heartbeat.interval}`);
   });
 
@@ -59,6 +62,25 @@ describe('Cron 表达式合法性', () => {
     const cfg = await load('heartbeat.yaml');
     // 历史缺陷：曾写为 "*/60"，实际是每小时一次，与「每5分钟」的注释不符
     assert.equal(cfg.heartbeat.interval, '*/5 * * * *');
+  });
+
+  test('heartbeat.yaml 中检查项的 interval 有效', async () => {
+    const cfg = await load('heartbeat.yaml');
+    for (const c of cfg.heartbeat.checks || []) {
+      // interval 可留空（继承全局），填了就必须是合法 cron
+      if (!c.interval) continue;
+      assert.ok(isValidCron(c.interval),
+        `检查项 ${c.name || '(未命名)'} 的 interval 非法: ${c.interval}`);
+    }
+  });
+
+  test('heartbeat.yaml 中检查项的 enabled 为布尔值', async () => {
+    const cfg = await load('heartbeat.yaml');
+    for (const c of cfg.heartbeat.checks || []) {
+      if (c.enabled === undefined) continue;
+      assert.equal(typeof c.enabled, 'boolean',
+        `检查项 ${c.name || '(未命名)'} 的 enabled 必须是布尔值`);
+    }
   });
 
   test('cron.yaml 中不存在重复任务 ID', async () => {

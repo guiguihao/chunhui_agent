@@ -1,0 +1,243 @@
+/* 可视化调度配置（CronBuilder）：桌面/移动共用一套结构，靠断点自适应 */
+
+.cron-builder {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+
+/* ── 模式切换：横向可滚动，窄屏不挤压变形 ── */
+.cron-modes {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+}
+
+.cron-modes::-webkit-scrollbar {
+  display: none;
+}
+
+.cron-mode-btn {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.cron-mode-btn:hover {
+  color: var(--text-main);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.cron-mode-btn.active {
+  background: rgba(139, 92, 246, 0.18);
+  border-color: rgba(139, 92, 246, 0.55);
+  color: var(--text-main);
+}
+
+/* ── 控件行 ── */
+.cron-builder-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.cron-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 150px;
+  min-width: 140px;
+}
+
+.cron-field.grow {
+  flex: 2 1 240px;
+}
+
+.cron-field-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.cron-inline-hint {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* 原生日期/时间选择器在深色背景下需要显式 color-scheme，
+   否则 iOS/Chrome 的图标与弹层会变成白底黑字的割裂样式 */
+.cron-builder input[type='date'],
+.cron-builder input[type='time'],
+.cron-builder input[type='number'],
+.cron-builder select {
+  color-scheme: dark;
+  min-height: 42px;
+}
+
+.cron-builder input.mono {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+}
+
+/* ── 星期选择 ── */
+.cron-weekdays {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cron-weekday {
+  flex: 1 1 44px;
+  min-width: 44px;
+  min-height: 38px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
+.cron-weekday:hover {
+  color: var(--text-main);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.cron-weekday.active {
+  background: linear-gradient(135deg, #8b5cf6 0%, #3b82f6 100%);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
+}
+
+/* ── 结果预览 ── */
+.cron-output {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px dashed var(--border-color);
+  background: rgba(0, 0, 0, 0.25);
+  font-size: 12.5px;
+}
+
+.cron-output.invalid {
+  border-color: rgba(239, 68, 68, 0.45);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.cron-output code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12.5px;
+  color: var(--accent-secondary);
+}
+
+.cron-output-desc {
+  color: var(--text-muted);
+}
+
+.cron-output.invalid .cron-output-desc {
+  color: #f87171;
+}
+
+.cron-output-icon.ok {
+  color: #10b981;
+}
+
+.cron-output-icon.err {
+  color: #ef4444;
+}
+
+.cron-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* 心跳页里的紧凑版 */
+.cron-builder.compact .cron-mode-btn {
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.cron-builder.compact .cron-output {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+/* 列表里的「人话」徽标 */
+.cron-desc-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
+  border-radius: 20px;
+  padding: 2px 8px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 移动端：单列布局 + 更大的点击区域 ── */
+@media (max-width: 640px) {
+  .cron-builder-row {
+    gap: 10px;
+  }
+
+  .cron-field,
+  .cron-field.grow {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .cron-mode-btn {
+    min-height: 38px;
+    padding: 8px 11px;
+    font-size: 13px;
+  }
+
+  .cron-weekday {
+    flex: 1 1 40px;
+    min-height: 42px;
+  }
+
+  .cron-builder input[type='date'],
+  .cron-builder input[type='time'],
+  .cron-builder input[type='number'],
+  .cron-builder select {
+    min-height: 46px;
+    font-size: 16px; /* 避免 iOS 聚焦时自动放大页面 */
+  }
+
+  .cron-output {
+    font-size: 12px;
+  }
+
+  .cron-output code {
+    word-break: break-all;
+  }
+}

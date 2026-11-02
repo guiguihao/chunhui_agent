@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react'
-import { Send, User, Bot, Plus, Cpu, ChevronDown, ChevronUp, CheckCircle2, Loader2 } from 'lucide-react'
+import { createPortal } from 'react-dom'
+import { Send, User, Bot, Plus, Cpu, ChevronDown, ChevronUp, CheckCircle2, Loader2, FileText, X, Download } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useLanguage } from './LanguageContext'
@@ -38,6 +39,56 @@ const extractImages = (text) => {
   return urls;
 };
 
+// ───────── 文件路径识别 ─────────
+// 会话里经常出现报告/数据文件路径（如 workspace/reports/daily_weather_20261030.md），
+// 需要渲染成可点击的入口。图片扩展名不在此列：图片走 extractImages 的画廊/灯箱
+const FILE_EXT_PATTERN = 'md|markdown|txt|log|json|csv|tsv|ya?ml|py|mjs?|sh|html?|pdf'
+const FILE_EXT_RE = new RegExp(`\\.(?:${FILE_EXT_PATTERN})$`, 'i')
+const IMAGE_EXT_RE = /\.(?:png|jpg|jpeg|gif|webp|svg)$/i
+
+// 去掉包裹用的标点/引号与 file:// 前缀，得到可以丢给 /api/file 的路径
+const normalizeFilePath = (raw) => {
+  let p = String(raw ?? '').trim()
+  p = p.replace(/^file:\/\//i, '')
+  p = p.replace(/^[（(【\["'`]+/, '').replace(/[)"'`\]】），。、；;:,]+$/, '')
+  if (p.startsWith('./')) p = p.slice(2)
+  return p
+}
+
+const isFilePathToken = (raw) => {
+  const p = normalizeFilePath(raw)
+  if (!p || p.length > 260 || /\s/.test(p)) return false
+  if (/^(?:https?|ftp|mailto|tel|data):/i.test(p)) return false
+  if (p.startsWith('/api/')) return false
+  // 至少带一层目录，避免把正文里的 "agent.yaml" 这类词误判成文件入口
+  if (!p.includes('/')) return false
+  return FILE_EXT_RE.test(p)
+}
+
+const isLocalFileHref = (href) => {
+  if (!href || typeof href !== 'string') return false
+  if (/^(?:https?|ftp|mailto|tel|data):/i.test(href) || href.startsWith('#')) return false
+  if (href.startsWith('/api/')) return false
+  return isFilePathToken(href.split(/[?#]/)[0])
+}
+
+// 扫描正文中未被 markdown 语法覆盖的裸路径（代码块/inline code/链接里的已由渲染器接管）
+const extractFilePaths = (text) => {
+  if (!text || typeof text !== 'string') return []
+  const stripped = text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`\n]*`/g, ' ')
+    .replace(/!?\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/(?:https?|ftp):\/\/\S+/gi, ' ')
+
+  const found = []
+  for (const token of stripped.match(/[^\s"'`()（）\[\]【】<>{},，。；：、]+/g) || []) {
+    const p = normalizeFilePath(token)
+    if (isFilePathToken(p) && !found.includes(p)) found.push(p)
+  }
+  return found
+}
+
 // ───────── Lightbox 全局弹出组件 ─────────
 function Lightbox({ src, alt, onClose }) {
   useEffect(() => {
@@ -46,26 +97,220 @@ function Lightbox({ src, alt, onClose }) {
     return () => window.removeEventListener('keydown', handleKey);
   }, [onClose]);
 
-  return (
+  // 必须挂到 body：.chat-container 带 backdrop-filter + overflow:hidden，
+  // 会成为 position:fixed 子元素的包含块并把弹层裁掉一部分
+  return createPortal(
     <div className="lightbox-overlay" onClick={onClose}>
       <div className="lightbox-content" onClick={(e) => e.stopPropagation()}>
         <img src={src} alt={alt} className="lightbox-image" />
         <button className="lightbox-close" onClick={onClose}>✕</button>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
+
+// ───────── 文件预览弹窗 ─────────
+const fileApiUrl = (p) => `/api/file?path=${encodeURIComponent(normalizeFilePath(p))}`
+
+function FilePreview({ path: filePath, onClose }) {
+  const { t } = useLanguage()
+  const cleanPath = normalizeFilePath(filePath)
+  const url = fileApiUrl(cleanPath)
+  const isImage = IMAGE_EXT_RE.test(cleanPath)
+  const isPdf = /\.pdf$/i.test(cleanPath)
+  const isHtml = /\.html?$/i.test(cleanPath)
+  const isMarkdown = /\.(?:md|markdown)$/i.test(cleanPath)
+  const needsFetch = !isImage && !isPdf && !isHtml
+
+  const [loading, setLoading] = useState(needsFetch)
+  const [error, setError] = useState('')
+  const [content, setContent] = useState('')
+  const [truncated, setTruncated] = useState(false)
+
+  useEffect(() => {
+    const handleKey = (e) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [onClose])
+
+  useEffect(() => {
+    if (!needsFetch) return
+    let cancelled = false
+    setLoading(true); setError(''); setContent(''); setTruncated(false)
+
+    fetch(url)
+      .then(async (res) => {
+        if (!res.ok) {
+          // 403/404 时后端返回 JSON（含 reason），直接展示比光秃秃的状态码有用
+          let reason = `${res.status} ${res.statusText}`
+          try {
+            const body = await res.json()
+            reason = body.reason || body.error || reason
+          } catch { /* 非 JSON 响应，保留状态码 */ }
+          throw new Error(reason)
+        }
+        return res.text()
+      })
+      .then((text) => {
+        if (cancelled) return
+        const LIMIT = 200000
+        setTruncated(text.length > LIMIT)
+        setContent(text.slice(0, LIMIT))
+      })
+      .catch((err) => { if (!cancelled) setError(err.message) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+
+    return () => { cancelled = true }
+  }, [url, needsFetch])
+
+  // portal 到 body，避免被 .chat-container / .message-body 的 overflow 与
+  // backdrop-filter 裁剪成「只露一半」
+  return createPortal(
+    <div className="file-preview-overlay" onClick={onClose}>
+      <div className="file-preview-panel" onClick={(e) => e.stopPropagation()}>
+        <header className="file-preview-header">
+          <div className="file-preview-title">
+            <FileText size={16} />
+            <span className="file-preview-name">{cleanPath.split('/').pop()}</span>
+            <span className="file-preview-path" title={cleanPath}>{cleanPath}</span>
+          </div>
+          <div className="file-preview-actions">
+            <a className="file-preview-btn" href={url} download title={t('file_preview_download')}>
+              <Download size={15} />
+            </a>
+            <button className="file-preview-btn" onClick={onClose} title={t('file_preview_close')}>
+              <X size={16} />
+            </button>
+          </div>
+        </header>
+
+        <div className="file-preview-body">
+          {loading && <div className="file-preview-hint">{t('file_preview_loading')}</div>}
+          {!loading && error && (
+            <div className="file-preview-hint error">{t('file_preview_error')}{error}</div>
+          )}
+          {!loading && !error && isImage && (
+            <img className="file-preview-image" src={url} alt={cleanPath} />
+          )}
+          {!loading && !error && isPdf && (
+            <iframe className="file-preview-frame" src={url} title={cleanPath} />
+          )}
+          {!loading && !error && isHtml && (
+            <iframe className="file-preview-frame" src={url} title={cleanPath} sandbox="" />
+          )}
+          {!loading && !error && needsFetch && (
+            isMarkdown ? (
+              <div className="markdown-body file-preview-markdown">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    table: ({node, ...props}) => (
+                      <div className="table-container">
+                        <table {...props} />
+                      </div>
+                    )
+                  }}
+                >
+                  {content}
+                </ReactMarkdown>
+              </div>
+            ) : (
+              <pre className="file-preview-text"><code>{content}</code></pre>
+            )
+          )}
+          {truncated && <div className="file-preview-hint">{t('file_preview_truncated')}</div>}
+        </div>
+      </div>
+    </div>,
+    document.body
+  )
+}
+
+// 可点击的文件条目：正文里出现的报告/数据文件都会渲染成这个
+function FileChips({ files, onOpen }) {
+  if (!files || files.length === 0) return null
+  return (
+    <div className="message-files">
+      {files.map((f) => (
+        <button key={f} type="button" className="file-chip" onClick={() => onOpen(f)} title={f}>
+          <FileText size={13} />
+          <span className="file-chip-name">{f.split('/').pop()}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// react-markdown 组件集合：链接与行内代码中的本地路径同样可点击预览
+const buildMarkdownComponents = ({ onOpenFile, onImageClick, imageTitle }) => ({
+  table: ({node, ...props}) => (
+    <div className="table-container">
+      <table {...props} />
+    </div>
+  ),
+  a: ({node, href, children, ...props}) => {
+    if (isLocalFileHref(href)) {
+      return (
+        <button type="button" className="inline-file-link" onClick={() => onOpenFile(normalizeFilePath(href))}>
+          {children}
+        </button>
+      )
+    }
+    return <a href={href} target="_blank" rel="noreferrer" {...props}>{children}</a>
+  },
+  code: ({node, className, children, ...props}) => {
+    const text = typeof children === 'string'
+      ? children
+      : Array.isArray(children) ? children.join('') : ''
+    // 只接管行内代码；带 language-* 的是 fenced block
+    if (!className && isFilePathToken(text)) {
+      return (
+        <button type="button" className="inline-file-link" onClick={() => onOpenFile(normalizeFilePath(text))}>
+          <FileText size={12} />{text}
+        </button>
+      )
+    }
+    return <code className={className} {...props}>{children}</code>
+  },
+  img: ({node, src, ...props}) => {
+    let webUrl = src
+    if (src) {
+      if (src.toLowerCase().startsWith('file:///')) {
+        webUrl = fileApiUrl(src.substring(7))
+      } else if (src.startsWith('/')) {
+        webUrl = fileApiUrl(src)
+      }
+    }
+    return (
+      <img
+        src={webUrl}
+        className="chat-embedded-image chat-thumbnail"
+        onClick={() => onImageClick(webUrl)}
+        title={imageTitle}
+        {...props}
+      />
+    )
+  }
+})
 
 // ───────── 子组件：渲染单个消息泡，支持独立的折叠与状态 ─────────
 function MessageItem({ msg }) {
   const [showThinking, setShowThinking] = useState(true);
   const [expandedTools, setExpandedTools] = useState({});
   const [lightboxSrc, setLightboxSrc] = useState(null);
+  const [previewPath, setPreviewPath] = useState(null);
   const { t } = useLanguage();
 
   // 图片正则扫描成本不低，且流式过程中每条 chunk 都会触发渲染；
   // 只有该消息文本变化时才需要重新提取
   const detectedImages = useMemo(() => extractImages(msg.content), [msg.content]);
+  const detectedFiles = useMemo(() => extractFilePaths(msg.content), [msg.content]);
+  const markdownComponents = buildMarkdownComponents({
+    onOpenFile: setPreviewPath,
+    onImageClick: setLightboxSrc,
+    imageTitle: t('lightbox_hover'),
+  });
 
   const toggleTool = (toolId) => {
     setExpandedTools(prev => ({
@@ -80,17 +325,13 @@ function MessageItem({ msg }) {
         <div className="message-bubble markdown-body">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
-            components={{
-              table: ({node, ...props}) => (
-                <div className="table-container">
-                  <table {...props} />
-                </div>
-              )
-            }}
+            components={markdownComponents}
           >
             {msg.content}
           </ReactMarkdown>
+          <FileChips files={detectedFiles} onOpen={setPreviewPath} />
         </div>
+        {previewPath && <FilePreview path={previewPath} onClose={() => setPreviewPath(null)} />}
       </div>
     );
   }
@@ -167,35 +408,12 @@ function MessageItem({ msg }) {
           <div className="message-bubble markdown-body">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
-              components={{
-                table: ({node, ...props}) => (
-                  <div className="table-container">
-                    <table {...props} />
-                  </div>
-                ),
-                img: ({node, src, ...props}) => {
-                  let webUrl = src;
-                  if (src) {
-                    if (src.toLowerCase().startsWith('file:///')) {
-                      webUrl = `/api/file?path=${encodeURIComponent(src.substring(7))}`;
-                    } else if (src.startsWith('/')) {
-                      webUrl = `/api/file?path=${encodeURIComponent(src)}`;
-                    }
-                  }
-                  return (
-                    <img 
-                      src={webUrl} 
-                      className="chat-embedded-image chat-thumbnail"
-                      onClick={() => setLightboxSrc(webUrl)}
-                      title={t('lightbox_hover')}
-                      {...props} 
-                    />
-                  );
-                }
-              }}
+              components={markdownComponents}
             >
               {msg.content}
             </ReactMarkdown>
+            {/* 正文里裸写的文件路径（未被链接/行内代码包裹）也渲染成可点击条目 */}
+            <FileChips files={detectedFiles} onOpen={setPreviewPath} />
           </div>
         )}
 
@@ -230,6 +448,11 @@ function MessageItem({ msg }) {
             alt={t('lightbox_title')} 
             onClose={() => setLightboxSrc(null)} 
           />
+        )}
+
+        {/* 文件预览弹窗（报告 / 数据 / 日志等） */}
+        {previewPath && (
+          <FilePreview path={previewPath} onClose={() => setPreviewPath(null)} />
         )}
       </div>
     </div>

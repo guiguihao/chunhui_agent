@@ -82,7 +82,7 @@ models:
           stream: true
     - name: moda
       base_url: "https://api-inference.modelscope.cn/v1"
-      api_key_env: "MODELSCOPE_TOKEN"
+      api_key_env: "MODELSCOPE_TOKEN1"
       models:
         - id: "deepseek-ai/DeepSeek-V4.1-Flash-1017"
           thinking: false

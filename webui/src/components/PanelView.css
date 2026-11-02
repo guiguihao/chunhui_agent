@@ -163,6 +163,15 @@ input:checked + .slider:before {
   background: rgba(0,0,0,0.1);
 }
 
+/* 停用的检查项仍然保留在列表里（方便随时打开），只是视觉上弱化 */
+.check-item.disabled {
+  opacity: 0.55;
+}
+
+.check-item.disabled .form-input {
+  color: var(--text-muted);
+}
+
 /* ── Reuse form styles ── */
 .form-row {
   display: flex;

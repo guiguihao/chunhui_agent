@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 import yaml from 'yaml';
 import dotenv from 'dotenv';
 import CoreAgent, { toSessionId } from './services/coreagent.js';
-import Scheduler from './services/scheduler.js';
+import Scheduler, { mergeConfiguredTasks } from './services/scheduler.js';
 import Heartbeat from './services/heartbeat.js';
 import MemoryService from './services/memory.js';
 import MessengerBridge from './services/messenger.js';
@@ -125,9 +125,17 @@ class SmartHomeAgent {
 
     // 关联心跳警报到消息广播
     if (this.heartbeat) {
-      this.heartbeat.setOnWarning(async (message, result) => {
+      this.heartbeat.setOnWarning(async (message, result, meta = {}) => {
         console.log(`[Agent] Heartbeat warning: ${message}`);
-        await this.messenger.broadcast(`⚠️ **系统巡检告警**\n\n${message}`);
+        const title = meta.check ? `⚠️ **系统巡检告警 · ${meta.check}**` : '⚠️ **系统巡检告警**';
+        // 只发结论会让前端丢掉核查过程；正文存在时合并，且避免与结论重复
+        const summary = String(message || '').trim();
+        const detail = String(meta.detail || '').trim();
+        let body = summary;
+        if (detail) {
+          body = summary && !detail.includes(summary) ? `${summary}\n\n${detail}` : detail;
+        }
+        await this.messenger.broadcast(`${title}\n\n${body}`);
       });
     }
 
@@ -500,7 +508,12 @@ class SmartHomeAgent {
     // 不加锁的话后写会丢掉先写的变更
     this._cronSaveQueue = (this._cronSaveQueue || Promise.resolve())
       .then(async () => {
-        const tasks = this.scheduler.listTasks();
+        // 表达式非法而注册失败的任务不在 scheduler 快照里，直接重写会把它
+        // 从 cron.yaml 中永久抹掉；按 id 补齐，保证保存只增不减
+        const tasks = mergeConfiguredTasks(
+          this.scheduler.listTasks(),
+          this.config?.cron?.tasks
+        );
         const cronPath = path.join(process.cwd(), 'config', 'cron.yaml');
         const yamlContent = yaml.stringify({
           cron: {

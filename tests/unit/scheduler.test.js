@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import Scheduler from '../../src/services/scheduler.js';
+import Scheduler, { mergeConfiguredTasks } from '../../src/services/scheduler.js';
 
 /**
  * 重点覆盖历史 bug：saveCronTasks 会把「未注册」的任务（即配置里 enabled:false 的）
@@ -66,6 +66,43 @@ describe('Scheduler 禁用任务持久化', () => {
     assert.deepEqual(written.filter(t => !t.enabled).map(t => t.id).sort(),
       ['disabled_b', 'disabled_c', 'enabled_a']);
     s.stopAll();
+  });
+});
+
+describe('saveCronTasks 快照合并', () => {
+  test('注册失败的任务不会被保存流程抹掉', () => {
+    const s = new Scheduler();
+    // 只有合法任务能注册成功；bad 会抛错并被 registerTasks 记入 failed
+    const { failed } = s.registerTasks([
+      { id: 'ok', name: '正常', cron: '0 7 * * *', enabled: true, prompt: 'p' },
+      { id: 'bad', name: '非法', cron: 'not-a-cron', enabled: true, prompt: 'p' },
+    ], async () => {});
+
+    assert.equal(failed.length, 1);
+    const listed = s.listTasks();
+    assert.equal(listed.length, 1);
+
+    const merged = mergeConfiguredTasks(listed, [
+      { id: 'ok', name: '正常', cron: '0 7 * * *', enabled: true, prompt: 'p' },
+      { id: 'bad', name: '非法', cron: 'not-a-cron', enabled: true, prompt: 'p' },
+    ]);
+    assert.equal(merged.length, 2, '配置中存在但注册失败的任务必须保留');
+    assert.deepEqual(merged.map(t => t.id), ['ok', 'bad'], '保持原顺序，补充项追加在后');
+    s.stopAll();
+  });
+
+  test('重复 id 不会被合并成两条', () => {
+    const merged = mergeConfiguredTasks(
+      [{ id: 'a', cron: '0 7 * * *' }],
+      [{ id: 'a', cron: '0 7 * * *' }, { id: 'b', cron: '0 8 * * *' }]
+    );
+    assert.deepEqual(merged.map(t => t.id), ['a', 'b']);
+  });
+
+  test('配置为空/缺省时保持原快照不变', () => {
+    const listed = [{ id: 'a', cron: '0 7 * * *' }];
+    assert.deepEqual(mergeConfiguredTasks(listed, undefined), listed);
+    assert.deepEqual(mergeConfiguredTasks(listed, []), listed);
   });
 });
 

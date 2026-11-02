@@ -69,6 +69,126 @@ describe('Heartbeat 动态巡检', () => {
   });
 });
 
+describe('Heartbeat 检查项 enabled / interval', () => {
+  test('缺省 enabled 视为启用（兼容老配置）', () => {
+    const hb = mkHeartbeat({}, { enabled: true, interval: '* * * * *', checks: [{ name: 'legacy', prompt: 'p' }] });
+    hb.start();
+    assert.equal(hb.tasks.length, 1);
+  });
+
+  test('enabled:false 的检查项不参与调度', () => {
+    const hb = mkHeartbeat({}, {
+      enabled: true,
+      interval: '* * * * *',
+      checks: [
+        { name: 'on', prompt: 'p' },
+        { name: 'off', prompt: 'p', enabled: false },
+      ],
+    });
+    hb.start();
+    assert.equal(hb.tasks.length, 1, '停用项不应创建定时任务');
+  });
+
+  test('手动触发（beat）也跳过停用项', async () => {
+    const executed = [];
+    const hb = mkHeartbeat(fakeAgent(executed), {
+      enabled: false,
+      checks: [
+        { name: 'on', prompt: 'A' },
+        { name: 'off', prompt: 'B', enabled: false },
+      ],
+    });
+    await hb.beat();
+    assert.deepEqual(executed.map(e => e.prompt), ['A']);
+  });
+
+  test('单项 interval 非法时回退全局且不影响后续检查项', () => {
+    const hb = mkHeartbeat({}, {
+      enabled: true,
+      interval: '* * * * *',
+      checks: [
+        { name: 'bad', prompt: 'p', interval: 'bogus' },
+        { name: 'good', prompt: 'p', interval: '*/2 * * * *' },
+      ],
+    });
+    assert.doesNotThrow(() => hb.start(), '一条坏配置不应中断整个心跳启动');
+    assert.equal(hb.tasks.length, 2);
+  });
+
+  test('热更新某项 enabled 会重建调度', () => {
+    const checks = [{ name: 'A', prompt: 'p' }, { name: 'B', prompt: 'p' }];
+    const hb = mkHeartbeat({}, { enabled: true, interval: '* * * * *', checks });
+    hb.start();
+    assert.equal(hb.tasks.length, 2);
+
+    hb.updateConfig({
+      enabled: true,
+      interval: '* * * * *',
+      checks: [{ name: 'A', prompt: 'p' }, { name: 'B', prompt: 'p', enabled: false }],
+    });
+    assert.equal(hb.tasks.length, 1, '停用 B 后应只剩 A 一个任务');
+  });
+});
+
+describe('Heartbeat 全局 interval 与时区', () => {
+  test('全局 interval 非法时回退默认值，不中断启动', () => {
+    const hb = mkHeartbeat({}, {
+      enabled: true,
+      interval: 'not a cron',
+      checks: [{ name: 'A', prompt: 'p' }],
+    });
+    assert.doesNotThrow(() => hb.start(), '全局 bad interval 不应抛穿 start()');
+    assert.equal(hb.interval, '*/5 * * * *');
+    assert.equal(hb.tasks.length, 1, '回退后静态检查项仍应被调度');
+  });
+
+  test('6 段带秒表达式同样按非法处理（与 WebUI 口径一致）', () => {
+    const hb = mkHeartbeat({}, {
+      enabled: true,
+      interval: '0 */5 * * * *',
+      checks: [{ name: 'A', prompt: 'p' }],
+    });
+    hb.start();
+    assert.equal(hb.interval, '*/5 * * * *');
+  });
+
+  test('时区可配置，默认 Asia/Shanghai', () => {
+    assert.equal(new Heartbeat({}, { enabled: false }).timezone, 'Asia/Shanghai');
+    assert.equal(new Heartbeat({}, { enabled: false, timezone: 'UTC' }).timezone, 'UTC');
+  });
+});
+
+describe('Heartbeat 告警内容完整性', () => {
+  test('广播必须带上 JSON 之外的完整正文', async () => {
+    const text = '```json\n{"is_warning": true, "reply": "测试：消息桥接器与心跳推送功能正常"}\n```\n\n'
+      + '链路第 33 次确认正常。空调巡检与壁挂炉哨兵当前没有在跑。';
+    let received = null;
+    const hb = mkHeartbeat({ decide: async () => ({ response: text }) }, { enabled: false });
+    hb.setOnWarning((msg, payload, meta) => { received = { msg, meta }; });
+
+    await hb._runCheck({ name: '系统告警测试', prompt: 'p' });
+
+    assert.equal(received.msg, '测试：消息桥接器与心跳推送功能正常');
+    assert.equal(received.meta.check, '系统告警测试');
+    assert.match(received.meta.detail, /链路第 33 次确认正常/, '正文不能被丢弃');
+    assert.doesNotMatch(received.meta.detail, /```/, 'JSON 围栏不应再贴一遍');
+  });
+
+  test('正文与结论完全相同时不重复附带', async () => {
+    let received = null;
+    const hb = mkHeartbeat(
+      { decide: async () => ({ is_warning: true, reply: '仅一句结论' }) },
+      { enabled: false },
+    );
+    hb.setOnWarning((msg, payload, meta) => { received = { msg, meta }; });
+
+    await hb._runCheck({ name: 'X', prompt: 'p' });
+
+    assert.equal(received.msg, '仅一句结论');
+    assert.equal(received.meta.detail, '');
+  });
+});
+
 describe('Heartbeat 配置热更新', () => {
   const CHECKS = [{ name: 'A', prompt: 'p' }];
 

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Save, RefreshCw, Plus, Trash2, ToggleLeft, ToggleRight, Clock } from 'lucide-react'
 import { useLanguage } from './LanguageContext'
 import { isValidCron } from '../lib/cron'
+import CronBuilder, { describeCron } from './CronBuilder'
 import './PanelView.css'
 
 // 列表渲染与展开状态用本地稳定的 _key 标识（业务 id 可被用户编辑、可能重复或为空）
@@ -78,7 +79,9 @@ export default function CronView() {
 
       <div className="panel-list">
         {tasks.length === 0 && <div className="panel-empty">{t('cron_empty')}</div>}
-        {tasks.map(task => (
+        {tasks.map(task => {
+          const scheduleText = describeCron(task.cron, t)
+          return (
           <div key={task._key} className={`panel-card glass-panel ${task.enabled ? '' : 'disabled'}`}>
             <div className="panel-card-header" onClick={() => setExpanded(expanded === task._key ? null : task._key)}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -87,8 +90,9 @@ export default function CronView() {
                 </button>
                 <div>
                   <div className="panel-card-title">{task.name || <em style={{opacity:0.4}}>{t('cron_unnamed')}</em>}</div>
-                  <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
                     <span className="cron-badge"><Clock size={11} /> {task.cron}</span>
+                    {scheduleText && <span className="cron-desc-badge">{scheduleText}</span>}
                     <span className="id-badge">{task.id}</span>
                   </div>
                 </div>
@@ -107,10 +111,13 @@ export default function CronView() {
                     <label className="form-label">{t('cron_name')}</label>
                     <input className="form-input" value={task.name} onChange={e => update(task._key,'name',e.target.value)} placeholder={t('cron_name_placeholder')} />
                   </div>
-                  <div className="form-group" style={{ minWidth: 180 }}>
-                    <label className="form-label">{t('cron_expr')}</label>
-                    <input className="form-input" value={task.cron} onChange={e => update(task._key,'cron',e.target.value)} placeholder={t('cron_expr_placeholder')} />
-                  </div>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">{t('cron_schedule')}</label>
+                  <CronBuilder
+                    value={task.cron}
+                    onChange={cron => update(task._key, 'cron', cron)}
+                  />
                 </div>
                 <div className="form-group">
                   <label className="form-label">{t('cron_prompt')}</label>
@@ -119,7 +126,8 @@ export default function CronView() {
               </div>
             )}
           </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )
