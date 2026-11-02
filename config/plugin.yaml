@@ -10,6 +10,15 @@ plugins:
     auto_reply: true
     # notification_chat_id: "oc_8a046ca7cb2879b737045340f86216f4" # 确保此行不带注释且 ID 正确
 
+  # 微信渠道 — 基于第三方 SDK weixin-agent-sdk（长轮询，非微信官方协议）
+  # 首次使用：启动后到 WebUI「渠道管理」点击「连接微信」扫码，凭据写入
+  # ${OPENCLAW_STATE_DIR:-~/.openclaw}/openclaw-weixin/accounts/，之后启动自动重连。
+  weixin:
+    enabled: true
+    auto_reply: true
+    # 主动推送默认发给扫码登录的那个微信用户；需要发给别人时填 ilink_user_id
+    # notification_user_id: ""
+
   # MCPorter 插件 — MCP Server 客户端
   mcporter:
     enabled: true

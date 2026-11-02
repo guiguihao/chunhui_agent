@@ -80,3 +80,26 @@
 - 正确验证方式：以任务是否按 cron 真实触发（收到推送）为准，或稍后复查 list。
 - 2026-10-30 15:29 daily_weather_1529 按点自动触发天气早报 → 证实调度器工作正常。
 - mgmt_cron_list 输出**不含 enabled 字段**，禁用态只能依赖 toggle 返回值，无独立核验手段。
+
+## ureal-mcp 服务体检（2026-11-02 11:56，用 workspace/mcp_probe.py + smarthome_cli.py 实测）
+- **MCP 进程层正常**：stdio 握手 0.8s 成功，协议 2025-11-25，serverInfo = `smarthome_mcp` v1.26.0；注册 **13 个工具**（7 只读）+ **7 个提示词**，资源 0 个。
+- **本地场景库正常**：`smarthome_list_local_scenes` → 「无本地场景」（本地 SQLite 可读，未受云端影响）。
+- 🔴 **云端登录态失效**：`/mqtt/cloud/get` 与 `/host/list2` 均返回 **code 110106「用户登录信息已失效，请重新登录！」**
+  - `smarthome_get_mcp_status` → `{"mqtt_connected": false, "active_gateway_sn": null}`
+  - `smarthome_get_homes` → `"homes": null`，并告警 `### Warning: No MQTT credentials.`
+- **结论与影响**：凡依赖网关的工具（get_project / query_device_status / control_device / get_device_capabilities / get_history / get_today_summary / get_period_summary / execute_local_scene）**当前全部不可用**，因取不到 G 开头 SN 且无 MQTT 通道。ureal-mcp 这条链路自 2026-11-02 起处于停用态。
+- **可行替代**：智能家居读写继续走 **Home Assistant MCP**（192.168.88.126:8123 / 127.0.0.1:8123 api/mcp，`mcp_ha-mcp_call_service`、`get_state`、`batch_get_state`），设备映射见长期知识中的海尔空调实体表。
+- **修复动作**：需主人重新登录 ureal 云账号以刷新 token（凭据文件在 mcp/ 配置内，Agent 严禁自行改动）。token 刷新后重跑 `python3 workspace/mcp_probe.py` 验证 mqtt_connected 是否转 true。
+- 探针脚本：`workspace/mcp_probe.py`（列工具/提示词/握手）；通用调用器 `workspace/smarthome_cli.py <tool> '<json>'`。
+
+## 2026-11-02 11:57 MCP 服务复检（含重要纠错）
+- 🔴 **纠错**：上一轮（11:55）判定「Home Assistant 完全离线」**不成立**。当时只探测了 `127.0.0.1:8123` 与 192.168.1.x/31.x/2.x，**漏掉了长期知识里记录的真实地址 192.168.88.126:8123**。
+- ✅ 实测：`http://192.168.88.126:8123/` → **HTTP 200**（前端在线）；`/api/`、`/api/config`、`POST /api/mcp` → **HTTP 401 Unauthorized**（服务健康，仅缺有效 Bearer token）。本机无 8123 监听、无 hass 进程、无 docker 容器 → HA 跑在 192.168.88.126 那台机器上，不在本服务器。
+- 结论：ha-mcp 链路可用性取决于**客户端是否持有 token**；本轮会话工具集中**未暴露 mcp_ha-mcp_\* 工具**，故 Agent 侧无法直接读写实体（按边界规则也严禁自行读取凭据文件补 token）。
+- 🔴 ureal-mcp 复检（11:57:25 重跑 workspace/mcp_probe.py）：握手成功 0.6s，smarthome_mcp v1.26.0，13 工具/7 提示词注册正常；`/mqtt/cloud/get` 仍返回 **code 110106 用户登录信息已失效**（token 7d49329e-…fe3c 已过期）→ `Warning: No MQTT credentials`，依赖 sn 的控制/查询类工具仍全部不可用。**自 11-02 11:56 起未恢复。**
+- 巡检方法论沉淀：判定「服务离线」前，必须先遍历长期知识中记录的**全部已知地址**，仅凭本机端口无监听不得下结论。
+
+## 2026-11-02 15:02 MCP 复测（无变化）
+- ureal-mcp：握手正常、13 工具/7 提示词齐全；`/mqtt/cloud/get` 与 `/host/list2` 仍返回 **110106 登录信息已失效**（token 7d49329e-185e-4702-84ce-7dfe5d9cfa0d 过期）→ `mqtt_connected:false`、`active_gateway_sn:null`、`homes:null`。依赖 sn 的工具全部不可用。**自 11:56 起持续 ~3 小时未恢复。**
+- HA：`192.168.88.126:8123` root=200（在线），`/api/`、`/api/mcp` = 401（缺 token）；本机 8123 无监听。
+- 注：本机无 `timeout` 命令（macOS），跑 mcp_probe.py 直接用 `python3` + cmd_exec 的 timeout_ms。

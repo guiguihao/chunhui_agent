@@ -1,0 +1,121 @@
+/* ChannelsView (渠道管理) — 复用 PanelView.css / MCPView.css 的卡片与弹窗样式 */
+
+.channel-card {
+  padding: 0;
+}
+
+.channel-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 20px;
+}
+
+.channel-icon {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+}
+
+.channel-icon.ok {
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.3);
+  color: #10b981;
+}
+
+.channel-icon.warn {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.3);
+  color: #f59e0b;
+}
+
+.channel-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.channel-name-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.channel-detail {
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.channel-error {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #ef4444;
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.channel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ── 状态胶囊 ── */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  border-radius: 20px;
+  padding: 2px 10px;
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.status-pill.ok {
+  color: #10b981;
+  border-color: rgba(16, 185, 129, 0.3);
+  background: rgba(16, 185, 129, 0.12);
+}
+
+.status-pill.warn {
+  color: #f59e0b;
+  border-color: rgba(245, 158, 11, 0.3);
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.status-pill.off {
+  color: var(--text-muted);
+  border-color: var(--border-color);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* ── 扫码弹窗补充 ── */
+.wx-scan-ok {
+  color: #10b981 !important;
+  font-weight: 600;
+}
+
+.wx-fallback a {
+  color: var(--accent-primary);
+  word-break: break-all;
+}
+
+.wx-fallback {
+  max-width: 300px;
+  line-height: 1.5;
+  word-break: break-all;
+}

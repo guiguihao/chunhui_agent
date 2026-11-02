@@ -32,10 +32,12 @@
     "mcporter": "^0.12.0",
     "node-cron": "^4.2.1",
     "openai": "^6.42.0",
+    "qrcode": "^1.5.4",
+    "weixin-agent-sdk": "^0.5.0",
     "ws": "^8.21.0",
     "yaml": "^2.9.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   }
 }

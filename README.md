@@ -62,7 +62,7 @@
 ## 🚀 快速开始
 
 ### 1. 环境准备
-- Node.js >= 18.0.0
+- Node.js >= 22.0.0（`weixin-agent-sdk` 要求，低版本会导致该渠道无法加载）
 - pnpm (推荐) 或 npm
 - Python >= 3.10 (如需使用 Python 编写的 MCP Server 或技能脚本)
 
@@ -119,6 +119,7 @@ urealagent_new/
 │   └── ureal-mcp/               # 悠瑞智能家居控制与审计日志
 ├── plugin/                      # 外部通信与界面扩展插件
 │   ├── feishu.js                # 飞书交互式卡片长连接服务
+│   ├── weixin.js                # 微信渠道（长轮询 + 扫码登录 + 主动推送）
 │   ├── mcporter.js              # MCPporter 客户端及工具动态发现
 │   └── webui.js                 # WebUI 后端 API 与安全服务
 ├── skills/                      # 扩展技能目录 (Markdown/JS/Python)
@@ -155,6 +156,27 @@ urealagent_new/
 - **[config/cron.yaml](file:///Volumes/ssd/project/xuexi/urealagent_new/config/cron.yaml)**：配置静态定时任务，支持 AI 动态添加与启停管理，数据自动持久化。
 - **[config/heartbeat.yaml](file:///Volumes/ssd/project/xuexi/urealagent_new/config/heartbeat.yaml)**：配置自检间隔与自检 Prompt，异常时自动触发报警。
 - **[config/plugin.yaml](file:///Volumes/ssd/project/xuexi/urealagent_new/config/plugin.yaml)**：配置飞书机器人、MCP 端口及 WebUI 服务端口。
+
+---
+
+## 💬 渠道管理（WebUI / 飞书 / 微信）
+
+WebUI 侧边栏「渠道管理」汇总所有消息渠道的实时状态，并支持在页面上完成微信扫码接入。
+
+- **飞书**：在 `config/plugin.yaml` 填好 `app_id` / `app_secret`（或 `.env` 中的变量），启动即自动连接。
+- **微信**：基于第三方 SDK [`weixin-agent-sdk`](https://github.com/wong2/weixin-agent-sdk) 的长轮询实现，**非微信官方协议**，请自行评估账号风险。
+  1. 启动服务后打开 WebUI →「渠道管理」→ 微信卡片点击「连接微信」；
+  2. 弹窗展示二维码，手机微信扫码并在手机上确认；
+  3. 凭据写入 `${OPENCLAW_STATE_DIR:-~/.openclaw}/openclaw-weixin/accounts/`，下次启动自动重连（无需再扫码）。
+
+微信渠道的限制（协议决定，无法规避）：
+
+| 限制 | 说明 |
+|------|------|
+| 单账号 | 每次扫码会覆盖上一个账号，不支持多号并存 |
+| 主动推送需先有入站消息 | 微信下发的 `context_token` 只存在进程内存里，**本次启动后必须先在微信里给机器人发一条消息**，定时任务/心跳告警才能推送到微信；重启后需再发一条 |
+| 纯文本 | 回复会自动去除 Markdown（表格改写成「项目：值」逐行形式） |
+| 无需公网 | 走长轮询 `getupdates`，本机可直连，不用内网穿透 |
 
 ---
 

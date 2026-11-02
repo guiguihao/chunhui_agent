@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { MessageSquare, Settings, Clock, Heart, Boxes, Activity, Languages, RotateCw } from 'lucide-react'
+import { MessageSquare, Settings, Clock, Heart, Boxes, Link2, Activity, Languages, RotateCw } from 'lucide-react'
 import { useLanguage } from './LanguageContext'
 import './Sidebar.css'
 
@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { id: 'cron', labelKey: 'nav_cron', icon: Clock },
   { id: 'heartbeat', labelKey: 'nav_heartbeat', icon: Heart },
   { id: 'mcp', labelKey: 'nav_mcp', icon: Boxes },
+  { id: 'channels', labelKey: 'nav_channels', icon: Link2 },
 ]
 
 // 重启后轮询健康检查的参数

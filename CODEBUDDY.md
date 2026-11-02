@@ -115,6 +115,8 @@ npm run setup-mcp   # 扫描 mcp/ 目录并与 config/mcporter.json 比对，只
 
 `register(name, service)` + `broadcast(text)`：有 `broadcast` 方法的服务自行分发，否则走 `notificationChatId + send`。飞书 `chatId → sessionId = feishu_<chatId>`；WebUI 的 `broadcast` 同时 push SSE 事件并写入当前会话历史。新增渠道只需实现 `send`/`broadcast` 并注册。
 
+微信渠道（`plugin/weixin.js`）另有两个坑：`broadcast` 必须内部 catch 后返回 false（`MessengerBridge.broadcast` 用 `Promise.all`，抛错会拖垮整轮广播）；`context_token` 由入站消息下发且只存 SDK 进程内存，所以进程启动后必须先收到一条消息才能主动推送，重启即失效。
+
 ### WebUI（`webui/`）
 
 React 18 + Vite，无路由库、无状态库：`App.jsx` + `components/`（`SessionView`、`CronView`、`HeartbeatView`、`ConfigView`、`MCPView`、`Sidebar`）与后端 `/api/chat`（SSE 流式）、`/api/events`（SSE 事件）、`/api/{cron,heartbeat,config,mcp,env,memory}` 一一对应。`plugin/webui.js` 是单文件 Express 服务，导出 `buildDisplayHistory`/`formatEnvValue`/`parseEnvValue`/`patchDefaultModel` 供单测直接 import。

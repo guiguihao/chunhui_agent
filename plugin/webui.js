@@ -854,6 +854,115 @@ class WebUIService {
     });
 
     // ──────────────────────────────────────────
+    // 渠道管理
+    //
+    // 把各消息渠道（WebUI / 飞书 / 微信）的状态汇总成一个列表，
+    // 前端据此渲染「已连接 / 未连接」。微信额外支持扫码登录。
+    // ──────────────────────────────────────────
+    this.app.get('/api/channels', async (req, res) => {
+      try {
+        const ai = this.agentInstance;
+        const channels = [];
+
+        // WebUI 自身永远是连着的（这个请求就是它发出来的）
+        channels.push({
+          id: 'webui',
+          name: 'WebUI',
+          enabled: true,
+          connected: true,
+          canPush: true,
+          detail: `http://localhost:${this.port}`,
+          lastError: null,
+        });
+
+        const feishu = ai?.feishu;
+        channels.push({
+          id: 'feishu',
+          name: 'Feishu',
+          enabled: Boolean(feishu),
+          connected: Boolean(feishu?.client && feishu?.wsClient),
+          canPush: Boolean(feishu?.notificationChatId),
+          detail: feishu
+            ? (feishu.notificationChatId ? `通知群: ${feishu.notificationChatId}` : '未设置通知群')
+            : '未启用（config/plugin.yaml）',
+          lastError: null,
+        });
+
+        const weixin = ai?.weixin;
+        const wx = weixin ? await weixin.snapshot() : null;
+        channels.push({
+          id: 'weixin',
+          name: 'WeChat',
+          enabled: Boolean(wx?.enabled),
+          connected: Boolean(wx?.running),
+          loggedIn: Boolean(wx?.loggedIn),
+          canPush: Boolean(wx?.canPush),
+          accountId: wx?.accountId || null,
+          detail: !wx
+            ? '未启用（config/plugin.yaml）'
+            : (wx.loggedIn ? `账号: ${wx.accountId}` : '未登录，点击「连接微信」扫码'),
+          lastError: wx?.lastError || null,
+          login: wx?.login || null,
+        });
+
+        res.json({ channels });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // 微信：发起扫码登录（返回二维码，后台自行轮询扫码结果）
+    this.app.post('/api/weixin/login', async (req, res) => {
+      const weixin = this.agentInstance?.weixin;
+      if (!weixin) {
+        return res.status(503).json({ success: false, error: '微信渠道未启用' });
+      }
+      try {
+        const snapshot = await weixin.startLogin();
+        res.json({ success: true, channel: snapshot });
+      } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+
+    // 微信：查询登录状态（前端弹窗轮询这个接口）
+    this.app.get('/api/weixin/status', async (req, res) => {
+      const weixin = this.agentInstance?.weixin;
+      if (!weixin) {
+        return res.status(503).json({ success: false, error: '微信渠道未启用' });
+      }
+      try {
+        res.json({ success: true, channel: await weixin.snapshot() });
+      } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+
+    // 微信：取消本次扫码（关闭弹窗时调用，避免后台空转 8 分钟）
+    this.app.post('/api/weixin/cancel', (req, res) => {
+      const weixin = this.agentInstance?.weixin;
+      if (!weixin) {
+        return res.status(503).json({ success: false, error: '微信渠道未启用' });
+      }
+      weixin.cancelLogin();
+      res.json({ success: true });
+    });
+
+    // 微信：退出登录（清空本地凭据并停止长轮询）
+    this.app.post('/api/weixin/logout', async (req, res) => {
+      const weixin = this.agentInstance?.weixin;
+      if (!weixin) {
+        return res.status(503).json({ success: false, error: '微信渠道未启用' });
+      }
+      try {
+        const snapshot = await weixin.logout();
+        res.json({ success: true, channel: snapshot });
+      } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+
+    // ──────────────────────────────────────────
     // 健康检查（供前端在重启后轮询恢复状态）
     // ──────────────────────────────────────────
     this.app.get('/api/health', (req, res) => {

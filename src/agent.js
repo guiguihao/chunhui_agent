@@ -13,6 +13,7 @@ import SkillService from './services/skill.js';
 import FeishuService from '../plugin/feishu.js';
 import MCPorterService from '../plugin/mcporter.js';
 import WebUIService from '../plugin/webui.js';
+import WeixinService from '../plugin/weixin.js';
 
 
 // 加载环境变量
@@ -33,6 +34,7 @@ class SmartHomeAgent {
     this.skill = null;     // 技能服务
     this.feishu = null;
     this.webui = null;
+    this.weixin = null;     // 微信渠道（weixin-agent-sdk 长轮询）
     // cron.yaml 写入队列：多个回合同时增删任务时串行化，避免快照覆盖丢变更
     this._cronSaveQueue = null;
   }
@@ -134,6 +136,14 @@ class SmartHomeAgent {
       this.messenger.register('feishu', this.feishu);
     }
 
+    // 7.1 初始化微信渠道
+    // 常驻实例（即使尚未扫码登录）：WebUI 的渠道管理要能随时发起登录，
+    // 登录成功后由插件自己拉起长轮询，无需重启进程。
+    if (this.config.plugins?.weixin?.enabled !== false && this.config.plugins?.weixin) {
+      this.weixin = new WeixinService(this.config.plugins.weixin, this);
+      this.messenger.register('weixin', this.weixin);
+    }
+
     // 关联心跳警报到消息广播
     if (this.heartbeat) {
       this.heartbeat.setOnWarning(async (message, result, meta = {}) => {
@@ -186,6 +196,11 @@ class SmartHomeAgent {
       await this.feishu.start();
     }
 
+    // 4.1 启动微信渠道（仅在已扫码登录时真正拉起长轮询）
+    if (this.weixin) {
+      await this.weixin.start();
+    }
+
     // 5. 启动 MCPorter 服务
     if (this.mcporter) {
       await this.mcporter.start();
@@ -212,6 +227,11 @@ class SmartHomeAgent {
     // 停止飞书服务
     if (this.feishu) {
       await this.feishu.stop();
+    }
+
+    // 停止微信渠道（abort 长轮询）
+    if (this.weixin) {
+      await this.weixin.stop();
     }
 
     // 停止 MCPorter 服务
@@ -260,6 +280,7 @@ class SmartHomeAgent {
       this.feishu = null;
       this.mcporter = null;
       this.webui = null;
+      this.weixin = null;
 
       await this.init();
 
@@ -700,7 +721,8 @@ class SmartHomeAgent {
 
       case 'env': {
         const { updated, removed } = await this.reloadEnv();
-        return { reloadable: true, requiresRestart: ['feishu'], updated, removed };
+        // 飞书凭证、微信状态目录（OPENCLAW_STATE_DIR）都在服务启动时固化
+        return { reloadable: true, requiresRestart: ['feishu', 'weixin'], updated, removed };
       }
 
       case 'mcp':

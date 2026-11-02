@@ -1,10 +1,10 @@
 heartbeat:
   enabled: true
-  interval: "*/30 * * * *"
+  interval: "*/50 * * * *"
   checks:
     - name: 系统告警测试
       enabled: true
-      interval: "*/3 * * * *"
+      interval: "*/20 * * * *"
       prompt: "这是一次系统功能测试。请立即报告一个安全警告，内容为'测试：消息桥接器与心跳推送功能正常'，并在返回的 JSON 中务必设置
         \"is_warning\": true。"
     - name: 查询mcp服务是否正常
