@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import dotenv from 'dotenv';
-import { formatEnvValue, parseEnvValue } from '../../plugin/webui.js';
+import { formatEnvValue, parseEnvValue, patchEnvVars, readEnvVars } from '../../plugin/webui.js';
 
 /**
  * 覆盖 WebUI 编辑 .env 的「读取 → 保存」往返流程。
@@ -106,5 +106,86 @@ describe('.env 往返一致性（GET → POST → 重新解析）', () => {
     // 新实现
     const fixed = dotenv.parse(`NOTE=${formatEnvValue('abc #123')}`);
     assert.equal(fixed.NOTE, 'abc #123');
+  });
+});
+
+/**
+ * patchEnvVars 是渠道配置弹窗的写入路径：只改指定 key，
+ * 其余行（注释、空行、顺序、其他变量）必须原样保留 ——
+ * 否则「改飞书凭证」会顺手抹掉别人的 API Key。
+ */
+describe('patchEnvVars — 按 key 就地更新', () => {
+  const ORIGINAL = [
+    '# 微信/飞书凭证',
+    'FEISHU_APP_ID=cli_old',
+    '',
+    'FEISHU_APP_SECRET=old_secret',
+    'DEEPSEEK_API_KEY=sk-keepme # 别动',
+  ].join('\n');
+
+  test('只改目标 key，注释与其他变量保持不变', () => {
+    const out = patchEnvVars(ORIGINAL, { FEISHU_APP_ID: 'cli_new' });
+    assert.ok(out.includes('# 微信/飞书凭证'));
+    assert.ok(out.includes('DEEPSEEK_API_KEY=sk-keepme # 别动'));
+    assert.ok(out.includes('FEISHU_APP_SECRET=old_secret'));
+
+    const parsed = dotenv.parse(out);
+    assert.equal(parsed.FEISHU_APP_ID, 'cli_new');
+    assert.equal(parsed.FEISHU_APP_SECRET, 'old_secret');
+  });
+
+  test('文件里没有的 key 追加到末尾', () => {
+    const out = patchEnvVars('A=1\n', { FEISHU_APP_SECRET: 'sec' });
+    assert.equal(out, 'A=1\nFEISHU_APP_SECRET=sec\n');
+    assert.equal(dotenv.parse(out).FEISHU_APP_SECRET, 'sec');
+  });
+
+  test('文件末尾没有换行时也不会和上一行粘在一起', () => {
+    const out = patchEnvVars('A=1', { B: '2' });
+    assert.equal(out, 'A=1\nB=2\n');
+  });
+
+  test('空字符串表示清空，写回 KEY= 结构', () => {
+    const out = patchEnvVars(ORIGINAL, { FEISHU_APP_SECRET: '' });
+    assert.ok(out.includes('FEISHU_APP_SECRET=\n'));
+    assert.equal(dotenv.parse(out).FEISHU_APP_SECRET, '');
+  });
+
+  test('含空格 / # 的值必须加引号后才写回', () => {
+    const out = patchEnvVars(ORIGINAL, { FEISHU_APP_SECRET: 'a b #c' });
+    assert.equal(dotenv.parse(out).FEISHU_APP_SECRET, 'a b #c');
+  });
+
+  test('相似前缀的 key 不会被误改', () => {
+    const src = 'FEISHU_APP_ID_OLD=x\nFEISHU_APP_ID=y\n';
+    const out = patchEnvVars(src, { FEISHU_APP_ID: 'z' });
+    const parsed = dotenv.parse(out);
+    assert.equal(parsed.FEISHU_APP_ID_OLD, 'x');
+    assert.equal(parsed.FEISHU_APP_ID, 'z');
+  });
+
+  test('undefined 表示不改（前端只提交部分字段时）', () => {
+    const out = patchEnvVars(ORIGINAL, { FEISHU_APP_ID: undefined, FEISHU_APP_SECRET: 'new' });
+    const parsed = dotenv.parse(out);
+    assert.equal(parsed.FEISHU_APP_ID, 'cli_old');
+    assert.equal(parsed.FEISHU_APP_SECRET, 'new');
+  });
+});
+
+describe('readEnvVars — 只读取关心的变量', () => {
+  test('返回指定 key 并剥掉引号', () => {
+    const src = ['# c', 'FEISHU_APP_ID="cli_x"', "FEISHU_APP_SECRET='s e c'", 'OTHER=1'].join('\n');
+    assert.deepEqual(readEnvVars(src, ['FEISHU_APP_ID', 'FEISHU_APP_SECRET']), {
+      FEISHU_APP_ID: 'cli_x',
+      FEISHU_APP_SECRET: 's e c',
+    });
+  });
+
+  test('缺失的 key 不出现在结果里', () => {
+    assert.deepEqual(readEnvVars('A=1', ['FEISHU_APP_ID']), {});
+  });
+
+  test('注释行不会被当成变量', () => {
+    assert.deepEqual(readEnvVars('# FEISHU_APP_ID=cli_x', ['FEISHU_APP_ID']), {});
   });
 });

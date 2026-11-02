@@ -72,6 +72,75 @@
   flex-shrink: 0;
 }
 
+/* 可点击的卡片行（飞书 → 凭证配置） */
+.channel-row.clickable {
+  cursor: pointer;
+  border-radius: 16px;
+  transition: background 0.15s ease;
+}
+
+.channel-row.clickable:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* ── 飞书配置弹窗 ── */
+.feishu-modal {
+  width: 440px;
+  max-width: calc(100vw - 32px);
+}
+
+.feishu-body {
+  padding: 20px 24px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.feishu-body .form-group {
+  margin-bottom: 0;
+}
+
+.feishu-body .status-pill {
+  align-self: flex-start;
+}
+
+.feishu-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.feishu-warn {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+.secret-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.secret-row .form-input {
+  flex: 1;
+}
+
+.feishu-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+}
+
 /* ── 状态胶囊 ── */
 .status-pill {
   display: inline-flex;

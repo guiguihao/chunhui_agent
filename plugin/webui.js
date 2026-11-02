@@ -129,6 +129,62 @@ function parseEnvValue(raw) {
 }
 
 /**
+ * 按 key 就地更新 .env 中的若干变量，其余行（含注释、空行、顺序）原样保留
+ *
+ * 不能走 POST /api/env 那套「整份 lines 重写」：渠道配置弹窗只关心两个 key，
+ * 用整份重写一旦前端快照过期就会把别的变量抹掉。
+ *
+ * @param {string} text - .env 原始内容
+ * @param {Record<string, string>} updates - key → 新值（undefined 表示不改）
+ * @returns {string} 更新后的内容
+ */
+function patchEnvVars(text, updates = {}) {
+  const pending = new Map(
+    Object.entries(updates).filter(([, v]) => v !== undefined && v !== null),
+  );
+
+  const lines = String(text ?? '').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^([ \t]*)([A-Za-z_][A-Za-z0-9_]*)[ \t]*=/);
+    if (!m) continue;
+    const key = m[2];
+    if (!pending.has(key)) continue;
+    lines[i] = `${m[1]}${key}=${formatEnvValue(pending.get(key))}`;
+    pending.delete(key);
+  }
+
+  let content = lines.join('\n');
+  // 文件里没有的变量追加到末尾（首次配置 FEISHU_* 就是这条路径）
+  if (pending.size > 0) {
+    if (content && !content.endsWith('\n')) content += '\n';
+    for (const [key, value] of pending) content += `${key}=${formatEnvValue(value)}\n`;
+  }
+  return content;
+}
+
+/**
+ * 从 .env 正文中取出指定变量的值（不读 process.env，文件才是事实来源）
+ *
+ * @param {string} text - .env 原始内容
+ * @param {string[]} keys - 需要的变量名
+ * @returns {Record<string, string>} 未定义的键不出现在结果里
+ */
+function readEnvVars(text, keys = []) {
+  const wanted = new Set(keys);
+  const out = {};
+  for (const line of String(text ?? '').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim();
+    if (!wanted.has(key)) continue;
+    out[key] = parseEnvValue(line.slice(eq + 1));
+  }
+  return out;
+}
+
+/**
  * 修改 agent.yaml 中 models.default 的取值
  *
  * 需要兼容两种等价写法（此前只支持列表写法，导致标量写法下保存被静默忽略）：
@@ -864,18 +920,17 @@ class WebUIService {
         const ai = this.agentInstance;
         const channels = [];
 
-        // WebUI 自身永远是连着的（这个请求就是它发出来的）
-        channels.push({
-          id: 'webui',
-          name: 'WebUI',
-          enabled: true,
-          connected: true,
-          canPush: true,
-          detail: `http://localhost:${this.port}`,
-          lastError: null,
-        });
-
         const feishu = ai?.feishu;
+        // 卡片上展示应用标识（FEISHU_APP_ID），便于确认连的是哪个飞书应用
+        let feishuAppId = '';
+        if (feishu) {
+          const envPath = path.join(process.cwd(), '.env');
+          const envContent = await fs.readFile(envPath, 'utf8').catch(() => '');
+          feishuAppId = readEnvVars(envContent, ['FEISHU_APP_ID']).FEISHU_APP_ID || '';
+          if (!feishuAppId) feishuAppId = String(feishu.appId || '');
+          // plugin.yaml 里的 ${FEISHU_APP_ID} 在变量缺失时会原样保留，不能当真实值展示
+          if (feishuAppId.includes('${')) feishuAppId = '';
+        }
         channels.push({
           id: 'feishu',
           name: 'Feishu',
@@ -883,7 +938,7 @@ class WebUIService {
           connected: Boolean(feishu?.client && feishu?.wsClient),
           canPush: Boolean(feishu?.notificationChatId),
           detail: feishu
-            ? (feishu.notificationChatId ? `通知群: ${feishu.notificationChatId}` : '未设置通知群')
+            ? (feishuAppId ? `FEISHU_APP_ID: ${feishuAppId}` : '未配置 FEISHU_APP_ID')
             : '未启用（config/plugin.yaml）',
           lastError: null,
         });
@@ -908,6 +963,49 @@ class WebUIService {
         res.json({ channels });
       } catch (err) {
         res.status(500).json({ error: err.message });
+      }
+    });
+
+    // 飞书：读取 .env 中的应用凭证（渠道管理弹窗用）
+    this.app.get('/api/channels/feishu/config', async (req, res) => {
+      try {
+        const envPath = path.join(process.cwd(), '.env');
+        const content = await fs.readFile(envPath, 'utf8').catch(() => '');
+        const vars = readEnvVars(content, ['FEISHU_APP_ID', 'FEISHU_APP_SECRET']);
+        const feishu = this.agentInstance?.feishu;
+        res.json({
+          appId: vars.FEISHU_APP_ID || '',
+          appSecret: vars.FEISHU_APP_SECRET || '',
+          // plugin.yaml 里是否启用了飞书（未启用时即便填了凭证也不会连接）
+          enabled: Boolean(feishu),
+          running: Boolean(feishu?.wsClient),
+        });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // 飞书：写入应用凭证到 .env（只改这两个 key，保留注释与其他变量）
+    this.app.post('/api/channels/feishu/config', async (req, res) => {
+      try {
+        const updates = {};
+        if (req.body?.appId !== undefined) updates.FEISHU_APP_ID = String(req.body.appId).trim();
+        if (req.body?.appSecret !== undefined) updates.FEISHU_APP_SECRET = String(req.body.appSecret).trim();
+        if (Object.keys(updates).length === 0) {
+          return res.status(400).json({ success: false, error: '没有需要保存的字段' });
+        }
+
+        const envPath = path.join(process.cwd(), '.env');
+        const content = await fs.readFile(envPath, 'utf8').catch(() => '');
+        await fs.writeFile(envPath, patchEnvVars(content, updates), 'utf8');
+
+        // 同步 process.env；飞书客户端在启动时固化，因此如实回报需要重启
+        const reload = this.agentInstance?.reloadSubsystem
+          ? await this.agentInstance.reloadSubsystem('env')
+          : { reloadable: false, requiresRestart: ['feishu'] };
+        res.json({ success: true, ...reload });
+      } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
       }
     });
 
@@ -1235,4 +1333,4 @@ class WebUIService {
 }
 
 export default WebUIService;
-export { formatEnvValue, parseEnvValue, patchDefaultModel };
+export { formatEnvValue, parseEnvValue, patchDefaultModel, patchEnvVars, readEnvVars };

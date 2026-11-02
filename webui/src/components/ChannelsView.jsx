@@ -1,22 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  RefreshCw, X, Link2, MessageSquare, Boxes, Smartphone,
-  LogIn, LogOut, CheckCircle2, AlertCircle,
+  RefreshCw, X, Link2, MessageSquare, Smartphone,
+  LogIn, LogOut, CheckCircle2, AlertCircle, Settings, Save, Eye, EyeOff, RotateCw,
 } from 'lucide-react'
 import { useLanguage } from './LanguageContext'
+import { restartAgent } from '../lib/restart'
 import './PanelView.css'
 import './MCPView.css'
 import './ChannelsView.css'
 
 // 渠道图标：新增渠道时在这里补一个即可，未命中用 Link2 兜底
 const CHANNEL_ICONS = {
-  webui: Boxes,
   feishu: MessageSquare,
   weixin: Smartphone,
 }
 
 const CHANNEL_NAME_KEYS = {
-  webui: 'ch_name_webui',
   feishu: 'ch_name_feishu',
   weixin: 'ch_name_weixin',
 }
@@ -172,12 +171,164 @@ function WeixinLoginModal({ onClose, onConnected }) {
   )
 }
 
+// ── 飞书凭证配置弹窗 ──────────────────────────────
+function FeishuConfigModal({ onClose }) {
+  const { t } = useLanguage()
+  const [appId, setAppId] = useState('')
+  const [appSecret, setAppSecret] = useState('')
+  const [enabled, setEnabled] = useState(true)
+  const [running, setRunning] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [showSecret, setShowSecret] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState('')
+  const [msgOk, setMsgOk] = useState(false)
+  const [needRestart, setNeedRestart] = useState(false)
+  const [restarting, setRestarting] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+    fetch('/api/channels/feishu/config')
+      .then((r) => r.json())
+      .then((d) => {
+        if (!alive) return
+        setAppId(d.appId || '')
+        setAppSecret(d.appSecret || '')
+        setEnabled(Boolean(d.enabled))
+        setRunning(Boolean(d.running))
+        setLoading(false)
+      })
+      .catch((e) => {
+        if (!alive) return
+        setMsg(e.message)
+        setLoading(false)
+      })
+    return () => { alive = false }
+  }, [])
+
+  const save = async () => {
+    setSaving(true)
+    setMsg('')
+    setNeedRestart(false)
+    try {
+      const res = await fetch('/api/channels/feishu/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appId, appSecret }),
+      })
+      const data = await res.json()
+      if (!res.ok || data.success === false) throw new Error(data.error || `HTTP ${res.status}`)
+
+      // 飞书客户端在启动时固化，凭证改动必须重启进程才生效，这里如实告知
+      const restartNeeded = (data.requiresRestart || []).includes('feishu')
+      setNeedRestart(restartNeeded)
+      setMsgOk(true)
+      setMsg(restartNeeded ? t('ch_feishu_saved') : t('ch_feishu_saved_norestart'))
+    } catch (e) {
+      setMsgOk(false)
+      setMsg(`${t('save_err')}${e.message}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const restart = async () => {
+    if (restarting) return
+    setRestarting(true)
+    const result = await restartAgent()
+    if (result === 'ok') {
+      // 重启后长连接与页面状态都已失效，刷新最干净
+      window.location.reload()
+      return
+    }
+    setRestarting(false)
+    setMsgOk(false)
+    setMsg(t('restart_fail'))
+  }
+
+  return (
+    <div className="qr-overlay" onClick={onClose}>
+      <div className="qr-modal feishu-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="qr-header">
+          <h3>{t('ch_feishu_title')}</h3>
+          <button className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+
+        <div className="feishu-body">
+          {loading ? (
+            <div className="feishu-loading"><RefreshCw size={18} className="spin" /> {t('ch_feishu_loading')}</div>
+          ) : (
+            <>
+              <div className={`status-pill ${running ? 'ok' : (enabled ? 'warn' : 'off')}`}>
+                {running ? t('ch_status_connected') : (enabled ? t('ch_status_disconnected') : t('ch_status_disabled'))}
+              </div>
+
+              {!enabled && <div className="feishu-warn">{t('ch_feishu_disabled_hint')}</div>}
+
+              <div className="form-group">
+                <label className="form-label">FEISHU_APP_ID</label>
+                <input
+                  className="form-input"
+                  value={appId}
+                  onChange={(e) => setAppId(e.target.value)}
+                  placeholder="cli_xxxxxxxxxxxxxxxx"
+                  spellCheck={false}
+                  autoComplete="off"
+                />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">FEISHU_APP_SECRET</label>
+                <div className="secret-row">
+                  <input
+                    className="form-input"
+                    type={showSecret ? 'text' : 'password'}
+                    value={appSecret}
+                    onChange={(e) => setAppSecret(e.target.value)}
+                    placeholder="••••••••••••••••"
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                  <button
+                    className="icon-btn"
+                    onClick={() => setShowSecret((v) => !v)}
+                    title={showSecret ? t('ch_feishu_hide') : t('ch_feishu_show')}
+                  >
+                    {showSecret ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+              </div>
+
+              <p className="form-hint">{t('ch_feishu_hint')}</p>
+              {msg && <div className={`save-msg ${msgOk ? 'ok' : 'err'}`}>{msg}</div>}
+
+              <div className="feishu-actions">
+                {needRestart && (
+                  <button className="btn btn-outline" onClick={restart} disabled={restarting}>
+                    <RotateCw size={14} className={restarting ? 'spin' : ''} />
+                    {restarting ? t('restart_running') : t('restart_btn')}
+                  </button>
+                )}
+                <button className="btn btn-primary" onClick={save} disabled={saving}>
+                  {saving ? <RefreshCw size={14} className="spin" /> : <Save size={14} />}
+                  {saving ? t('btn_saving') : t('btn_save')}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── 渠道管理主视图 ────────────────────────────────
 export default function ChannelsView() {
   const { t } = useLanguage()
   const [channels, setChannels] = useState([])
   const [loading, setLoading] = useState(true)
   const [showQR, setShowQR] = useState(false)
+  const [showFeishu, setShowFeishu] = useState(false)
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(async () => {
@@ -222,6 +373,7 @@ export default function ChannelsView() {
           onConnected={() => { setShowQR(false); load() }}
         />
       )}
+      {showFeishu && <FeishuConfigModal onClose={() => { setShowFeishu(false); load() }} />}
 
       <header className="view-header flex-between">
         <div>
@@ -238,10 +390,14 @@ export default function ChannelsView() {
           const Icon = CHANNEL_ICONS[channel.id] || Link2
           const status = statusOf(channel)
           const isWeixin = channel.id === 'weixin'
+          const isFeishu = channel.id === 'feishu'
 
           return (
             <div key={channel.id} className={`panel-card glass-panel channel-card ${channel.enabled ? '' : 'disabled'}`}>
-              <div className="channel-row">
+              <div
+                className={`channel-row ${isFeishu ? 'clickable' : ''}`}
+                onClick={isFeishu ? () => setShowFeishu(true) : undefined}
+              >
                 <div className={`channel-icon ${status.kind}`}><Icon size={18} /></div>
 
                 <div className="channel-info">
@@ -264,6 +420,14 @@ export default function ChannelsView() {
                 </div>
 
                 <div className="channel-actions">
+                  {isFeishu && (
+                    <button
+                      className="btn btn-outline"
+                      onClick={(e) => { e.stopPropagation(); setShowFeishu(true) }}
+                    >
+                      <Settings size={14} /> {t('ch_feishu_config')}
+                    </button>
+                  )}
                   {isWeixin && channel.enabled && !channel.loggedIn && (
                     <button className="btn btn-login-qr" onClick={() => setShowQR(true)}>
                       <LogIn size={14} /> {t('ch_connect_weixin')}
