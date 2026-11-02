@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { Save, RefreshCw, Plus, Trash2, Heart } from 'lucide-react'
 import { useLanguage } from './LanguageContext'
 import { isValidCron } from '../lib/cron'
-import CronBuilder from './CronBuilder'
+import CronBuilder, { DayRuleControl } from './CronBuilder'
 import './PanelView.css'
 
 // 检查项用本地稳定 _key 做 React key（name 可编辑且允许重复），提交前剥离
@@ -62,7 +62,13 @@ export default function HeartbeatView() {
   const updateCheck = (key, field, val) =>
     setHb(prev => ({ ...prev, checks: (prev.checks || []).map(c => c._key === key ? { ...c, [field]: val } : c) }))
 
-  const addCheck = () => setHb(prev => ({ ...prev, checks: [...(prev.checks || []), { _key: nextKey(), name: '', prompt: '', enabled: true, interval: '' }] }))
+  const addCheck = () => setHb(prev => ({
+    ...prev,
+    checks: [
+      ...(prev.checks || []),
+      { _key: nextKey(), name: '', prompt: '', enabled: true, interval: '', weekend: 'any', holiday: 'any' },
+    ],
+  }))
   const removeCheck = (key) => {
     setHb(prev => ({ ...prev, checks: (prev.checks || []).filter(c => c._key !== key) }))
     setOverrides(prev => {
@@ -194,6 +200,20 @@ export default function HeartbeatView() {
                   />
                 </div>
               )}
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label">{t('cron_day_rules')}</label>
+                <DayRuleControl
+                  compact
+                  weekend={chk.weekend || 'any'}
+                  holiday={chk.holiday || 'any'}
+                  onChange={({ weekend, holiday }) => setHb(prev => ({
+                    ...prev,
+                    checks: (prev.checks || []).map(c => (
+                      c._key === chk._key ? { ...c, weekend, holiday } : c
+                    )),
+                  }))}
+                />
+              </div>
             </div>
           ))}
         </div>

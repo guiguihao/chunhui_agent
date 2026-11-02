@@ -15,6 +15,7 @@ cron:
       cron: 0 10 * * *
       enabled: false
       prompt: 股市早报，20条内容， 并附带投资建议 (不要表格)
+      holiday: exclude
     - id: stock_noon_news
       name: 股市午报
       cron: 0 12 * * *
@@ -27,9 +28,11 @@ cron:
       prompt: 夜间新闻，20条内容，内容涵盖科技、财经和民生等领域 (不要表格)
     - id: task_1779441378781
       name: 午睡 中午12：30 关灯
-      cron: 30 12 * * 1-5
+      cron: 0 9 * * 1,2,3,4
       enabled: false
       prompt: 午睡 关闭所有灯光
+      weekend: exclude
+      holiday: exclude
     - id: task_1779441495277
       name: 午睡起床开灯
       cron: 30 13 * * 1-5

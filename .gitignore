@@ -143,3 +143,6 @@ webui/build/
 webui/.vite_ssr/
 
 workspace/*
+
+# 节假日远程缓存（运行时生成，可由 config/holidays.yaml 覆盖）
+/data/holidays-cache.json

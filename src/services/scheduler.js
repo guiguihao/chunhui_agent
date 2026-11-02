@@ -1,4 +1,5 @@
 import cron from 'node-cron';
+import { formatDateInTz, normalizeDayRule } from './holiday.js';
 
 /**
  * 实际调度状态：v4 有 getStatus()（idle/running/stopped/destroyed），旧版本回退到本地标记。
@@ -37,10 +38,64 @@ export function mergeConfiguredTasks(listed = [], configured = []) {
  * 根据 config/cron.yaml 配置执行定时任务
  */
 class Scheduler {
-  constructor() {
+  /**
+   * @param {object} [options]
+   * @param {import('./holiday.js').default} [options.holidayService] - 日期规则判定（可后置注入）
+   * @param {string} [options.timezone]
+   */
+  constructor(options = {}) {
     this.tasks = new Map();
     // 任务 id → 执行链（overlap: 'queue' 时上一轮没跑完就接在后面跑）
     this._chains = new Map();
+    this.holidayService = options.holidayService || null;
+    this.timezone = options.timezone || 'Asia/Shanghai';
+  }
+
+  /**
+   * 按「周末 / 法定假日」规则判断今天是否该跳过
+   *
+   * 这些规则没法编码进 5 段 cron，只能在触发时按真实日期拦截。
+   * 未注入 HolidayService 时一律放行，保持调度器可独立使用（单测/其他场景）。
+   *
+   * @param {{weekend?:string, holiday?:string}} options
+   * @returns {Promise<string>} 跳过原因，空串表示允许执行
+   */
+  async _dayRuleSkip(options = {}) {
+    const weekend = normalizeDayRule(options.weekend);
+    const holiday = normalizeDayRule(options.holiday);
+    if (weekend === 'any' && holiday === 'any') return '';
+    if (!this.holidayService) return '';
+
+    const today = formatDateInTz(new Date(), this.timezone);
+    const verdict = await this.holidayService.shouldRun(today, { weekend, holiday });
+    return verdict.run ? '' : `${verdict.reason} (${today})`;
+  }
+
+  /**
+   * 执行一次任务（先过日期规则，再执行）
+   *
+   * 抽成独立方法除了可读性，也让「跳过逻辑」可以在单测里直接验证，
+   * 不必真的等到 cron 触发。
+   *
+   * @param {string} id
+   * @param {Function} handler
+   * @param {object} options
+   * @returns {Promise<boolean>} 是否真的执行了
+   */
+  async _runTask(id, handler, options = {}) {
+    // 日期规则先于执行判断：跳过时不消耗 LLM 预算，也不产生推送
+    const skipReason = await this._dayRuleSkip(options);
+    if (skipReason) {
+      console.log(`[Scheduler] Skip ${id} (${options.name || 'unnamed'}): ${skipReason}`);
+      return false;
+    }
+    console.log(`[Scheduler] Executing: ${id} (${options.name || 'unnamed'})`);
+    try {
+      await handler();
+    } catch (error) {
+      console.error(`[Scheduler] Error in task ${id}:`, error.message);
+    }
+    return true;
   }
 
   /**
@@ -62,14 +117,7 @@ class Scheduler {
     // 期望启用状态：优先取显式 enabled，否则与是否立即调度保持一致
     const enabled = options.enabled !== undefined ? options.enabled !== false : scheduled;
 
-    const realHandler = async () => {
-      console.log(`[Scheduler] Executing: ${id} (${options.name || 'unnamed'})`);
-      try {
-        await handler();
-      } catch (error) {
-        console.error(`[Scheduler] Error in task ${id}:`, error.message);
-      }
-    };
+    const realHandler = () => this._runTask(id, handler, options);
 
     // overlap: 'skip'（默认，靠 noOverlap 丢弃重叠触发）
     //        | 'queue'（上一轮没跑完就接在后面跑，适合监控/哨兵类任务，不丢触发）
@@ -83,7 +131,7 @@ class Scheduler {
       : realHandler;
 
     const taskOptions = {
-      timezone: options.timezone || 'Asia/Shanghai',
+      timezone: options.timezone || this.timezone,
       // 任务耗时可能超过触发间隔（一轮对话 + 多次工具调用），
       // noOverlap 让上一轮未结束时跳过本次触发，避免同一任务自我叠加
       noOverlap: options.noOverlap !== false,
@@ -144,6 +192,9 @@ class Scheduler {
             enabled,
             // cron.yaml 里可为监控/哨兵类任务声明 overlap: queue（重叠触发改为排队补跑）
             overlap: taskConfig.overlap,
+            // 日期规则：any | only | exclude（触发时按当天日期判断）
+            weekend: normalizeDayRule(taskConfig.weekend),
+            holiday: normalizeDayRule(taskConfig.holiday),
           }
         );
       } catch (e) {
@@ -259,6 +310,8 @@ class Scheduler {
       running: isTaskRunning(data),
       prompt: data.options.prompt || '',
       overlap: data.options.overlap,
+      weekend: normalizeDayRule(data.options.weekend),
+      holiday: normalizeDayRule(data.options.holiday),
     }));
   }
 }

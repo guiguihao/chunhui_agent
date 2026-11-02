@@ -158,6 +158,38 @@ describe('Heartbeat 全局 interval 与时区', () => {
   });
 });
 
+describe('Heartbeat 日期规则（周末/法定假日）', () => {
+  test('规则不满足时跳过检查项（手动触发同样生效）', async () => {
+    const executed = [];
+    const hb = mkHeartbeat(fakeAgent(executed), {
+      enabled: false,
+      checks: [{ name: 'A', prompt: 'p', weekend: 'exclude' }],
+    });
+    hb.setHolidayService({ shouldRun: async () => ({ run: false, reason: 'weekend', known: true }) });
+
+    await hb.beat();
+
+    assert.deepEqual(executed, [], '周末不应执行检查项');
+  });
+
+  test('未设置日期规则时不查询节假日服务', async () => {
+    let queried = 0;
+    const executed = [];
+    const hb = mkHeartbeat(fakeAgent(executed), {
+      enabled: false,
+      checks: [{ name: 'A', prompt: 'p' }],
+    });
+    hb.setHolidayService({
+      shouldRun: async () => { queried += 1; return { run: false, reason: 'x' }; },
+    });
+
+    await hb.beat();
+
+    assert.equal(queried, 0);
+    assert.equal(executed.length, 1);
+  });
+});
+
 describe('Heartbeat 告警内容完整性', () => {
   test('广播必须带上 JSON 之外的完整正文', async () => {
     const text = '```json\n{"is_warning": true, "reply": "测试：消息桥接器与心跳推送功能正常"}\n```\n\n'

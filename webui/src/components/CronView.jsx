@@ -20,7 +20,13 @@ export default function CronView() {
 
   useEffect(() => {
     fetch('/api/cron').then(r => r.json()).then(d => {
-      setTasks((d.tasks || []).map(task => ({ ...task, _key: nextKey() })))
+      setTasks((d.tasks || []).map(task => ({
+        ...task,
+        // 老配置没有日期规则字段，补齐默认值供控件显示
+        weekend: task.weekend || 'any',
+        holiday: task.holiday || 'any',
+        _key: nextKey(),
+      })))
       setLoading(false)
     })
   }, [])
@@ -48,7 +54,16 @@ export default function CronView() {
     setTasks(prev => prev.map(t => t._key === key ? { ...t, [field]: val } : t))
 
   const addTask = () => {
-    const created = { _key: nextKey(), id: `task_${Date.now()}`, name: '', cron: '0 9 * * *', enabled: true, prompt: '' }
+    const created = {
+      _key: nextKey(),
+      id: `task_${Date.now()}`,
+      name: '',
+      cron: '0 9 * * *',
+      enabled: true,
+      prompt: '',
+      weekend: 'any',
+      holiday: 'any',
+    }
     setTasks(prev => [...prev, created])
     setExpanded(created._key)
   }
@@ -117,6 +132,11 @@ export default function CronView() {
                   <CronBuilder
                     value={task.cron}
                     onChange={cron => update(task._key, 'cron', cron)}
+                    weekend={task.weekend || 'any'}
+                    holiday={task.holiday || 'any'}
+                    onDayRuleChange={({ weekend, holiday }) => setTasks(prev => prev.map(t => (
+                      t._key === task._key ? { ...t, weekend, holiday } : t
+                    )))}
                   />
                 </div>
                 <div className="form-group">

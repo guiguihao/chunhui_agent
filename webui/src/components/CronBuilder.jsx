@@ -52,6 +52,99 @@ export function describeCron(cron, t) {
   return validateCronForm(form).ok ? describeCronText(form, t) : ''
 }
 
+// ── 节假日数据状态（全局缓存，避免每个检查项各拉一次） ──
+const HOLIDAY_STATUS_TTL = 60 * 1000
+const DAY_RULE_VALUES = ['any', 'only', 'exclude']
+
+let holidayStatusCache = { at: 0, data: null }
+
+const readHolidayStatus = async () => {
+  const res = await fetch('/api/holidays')
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const data = await res.json()
+  holidayStatusCache = { at: Date.now(), data }
+  return data
+}
+
+/**
+ * 日期限定控件：周末 / 法定假日
+ *
+ * 这两类规则无法用 5 段 cron 表达（cron 没有「节假日」概念，也无法从「周六日」
+ * 里排除调休上班），所以单独作为调度元数据保存，由后端在触发时按日期判断。
+ */
+export function DayRuleControl({ weekend = 'any', holiday = 'any', onChange, compact = false }) {
+  const { t } = useLanguage()
+  const [status, setStatus] = useState(() => (
+    Date.now() - holidayStatusCache.at < HOLIDAY_STATUS_TTL ? holidayStatusCache.data : null
+  ))
+  const [syncing, setSyncing] = useState(false)
+
+  useEffect(() => {
+    if (holiday === 'any' || status) return undefined
+    let cancelled = false
+    readHolidayStatus()
+      .then((data) => { if (!cancelled) setStatus(data) })
+      .catch(() => { if (!cancelled) setStatus({ year: '', known: false, source: 'error' }) })
+    return () => { cancelled = true }
+  }, [holiday, status])
+
+  const sync = async () => {
+    setSyncing(true)
+    try {
+      const res = await fetch('/api/holidays/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ year: status?.year }),
+      })
+      const data = await res.json()
+      const next = { ...data, known: Boolean(data.known) }
+      holidayStatusCache = { at: Date.now(), data: next }
+      setStatus(next)
+    } catch {
+      // 拉取失败时保留旧状态，把原因交给上面的缺失提示
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  const renderSeg = (field, label) => (
+    <div className="cron-day-rule">
+      <span className="cron-field-label">{label}</span>
+      <div className="cron-seg" role="group" aria-label={label}>
+        {DAY_RULE_VALUES.map((value) => (
+          <button
+            key={value}
+            type="button"
+            aria-pressed={(field === 'weekend' ? weekend : holiday) === value}
+            className={`cron-seg-btn ${(field === 'weekend' ? weekend : holiday) === value ? 'active' : ''}`}
+            onClick={() => onChange?.({ weekend, holiday, [field]: value })}
+          >
+            {t(`cron_${field}_${value}`)}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+
+  const dataMissing = holiday !== 'any' && status && status.known === false
+
+  return (
+    <div className={`cron-day-rules ${compact ? 'compact' : ''}`}>
+      {renderSeg('weekend', t('cron_weekend'))}
+      {renderSeg('holiday', t('cron_holiday'))}
+      {dataMissing && (
+        <p className="cron-note warn">
+          <AlertCircle size={12} />
+          {t('cron_holiday_data_missing', { year: status.year || new Date().getFullYear() })}
+          <button type="button" className="cron-holiday-sync" onClick={sync} disabled={syncing}>
+            {syncing ? t('cron_holiday_syncing') : t('cron_holiday_sync')}
+          </button>
+        </p>
+      )}
+    </div>
+  )
+}
+
 /**
  * 可视化调度配置
  *
@@ -64,7 +157,15 @@ export function describeCron(cron, t) {
  * @param {'daily'|'interval'} [props.defaultMode] - 空值时的初始模式
  * @param {boolean} [props.compact] - 心跳页里的紧凑版
  */
-export default function CronBuilder({ value = '', onChange, defaultMode = 'daily', compact = false }) {
+export default function CronBuilder({
+  value = '',
+  onChange,
+  defaultMode = 'daily',
+  compact = false,
+  weekend = 'any',
+  holiday = 'any',
+  onDayRuleChange,
+}) {
   const { t } = useLanguage()
   const [form, setForm] = useState(() => cronToForm(value, { preferMode: defaultMode }))
   // 记录最近一次由本组件发出的值，用于区分「外部更新」与「自身回流」
@@ -249,6 +350,16 @@ export default function CronBuilder({ value = '', onChange, defaultMode = 'daily
           {validation.ok ? description : t(`cron_err_${validation.code}`)}
         </span>
       </div>
+
+      {/* 日期限定不写进 cron（表达不了），作为调度元数据随任务保存 */}
+      {onDayRuleChange && (
+        <DayRuleControl
+          weekend={weekend}
+          holiday={holiday}
+          onChange={onDayRuleChange}
+          compact={compact}
+        />
+      )}
     </div>
   )
 }

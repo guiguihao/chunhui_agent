@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { toSessionId } from './coreagent.js';
 import { isValidCron, cronValidationError } from './cron-utils.js';
+import { formatDateInTz, normalizeDayRule } from './holiday.js';
 
 /** 动态巡检项的名称（由 AI 通过 mgmt_heartbeat_set 配置） */
 export const DYNAMIC_CHECK_NAME = '动态巡检';
@@ -117,6 +118,8 @@ class Heartbeat {
     this.interval = config.interval || '*/5 * * * *'; // 全局默认 interval
     // 与 Scheduler 共用可配置时区，避免两处硬编码各自漂移
     this.timezone = config.timezone || 'Asia/Shanghai';
+    // 日期规则判定（周末 / 法定假日），由 Agent 注入；未注入时一律放行
+    this.holidayService = null;
     this.checks = config.checks || [];
     this.tasks = [];            // 静态检查项任务列表
     this.dynamicTask = null;    // 动态巡检任务
@@ -297,10 +300,41 @@ class Heartbeat {
   /**
    * 执行单个检查项
    */
+  /**
+   * 注入节假日日历（Agent 初始化时调用）
+   * @param {object|null} service
+   */
+  setHolidayService(service) {
+    this.holidayService = service;
+  }
+
+  /**
+   * 检查项的日期规则判定
+   * @param {object} check
+   * @returns {Promise<string>} 跳过原因，空串表示允许执行
+   */
+  async _dayRuleSkip(check) {
+    const weekend = normalizeDayRule(check?.weekend);
+    const holiday = normalizeDayRule(check?.holiday);
+    if (weekend === 'any' && holiday === 'any') return '';
+    if (!this.holidayService) return '';
+
+    const today = formatDateInTz(new Date(), this.timezone);
+    const verdict = await this.holidayService.shouldRun(today, { weekend, holiday });
+    return verdict.run ? '' : `${verdict.reason} (${today})`;
+  }
+
   async _runCheck(check) {
     // 手动 trigger / beat() 也要尊重 enabled，否则 UI 上关掉的检查项仍会被执行
     if (!isCheckEnabled(check)) {
       console.log(`[Heartbeat] Skip "${check.name || 'default'}": disabled`);
+      return;
+    }
+
+    // 周末 / 法定假日规则：cron 表达不了，只能按当天日期拦截（手动触发同样生效）
+    const daySkip = await this._dayRuleSkip(check);
+    if (daySkip) {
+      console.log(`[Heartbeat] Skip "${check.name || 'default'}": ${daySkip}`);
       return;
     }
 

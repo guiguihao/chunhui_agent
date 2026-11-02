@@ -83,6 +83,19 @@ describe('Cron 表达式合法性', () => {
     }
   });
 
+  test('holidays.yaml 的年份与日期格式合法', async () => {
+    const cfg = await load('holidays.yaml');
+    for (const [year, info] of Object.entries(cfg.holidays || {})) {
+      assert.match(String(year), /^\d{4}$/, `年份键应为 YYYY: ${year}`);
+      for (const field of ['holidays', 'workdays']) {
+        for (const date of info?.[field] || []) {
+          assert.match(String(date), /^\d{4}-\d{2}-\d{2}$/,
+            `${year}.${field} 必须是 YYYY-MM-DD: ${date}`);
+        }
+      }
+    }
+  });
+
   test('cron.yaml 中不存在重复任务 ID', async () => {
     const cfg = await load('cron.yaml');
     const ids = cfg.cron.tasks.map(t => t.id);

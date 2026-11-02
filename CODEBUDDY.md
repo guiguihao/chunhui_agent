@@ -94,6 +94,12 @@ npm run setup-mcp   # 扫描 mcp/ 目录并与 config/mcporter.json 比对，只
 
 `FileAccessPolicy` 是唯一文件策略实现，被 `dispatcher` 的文件工具和 WebUI 的 `/api/file`、`/api/memory` 复用。规则：黑名单优先（`.env*`、`.ssh/.aws/.git`、`*.pem|key|crt|db`、路径含 `credential|secret|token|auth_data`）→ 写只允许 `workspace/` → 读允许 `workspace/` + `agent.file_read_roots` + media-only 根（`~/.miot-mcp` 等，仅图片）。归属判定用 `path.relative()`，不要改成字符串 `startsWith`（会被 `workspace-evil` 绕过）。
 
+### 日期限定：周末 / 法定假日（`src/services/holiday.js`）
+
+5 段 cron 无法表达「排除周末」「排除法定假日」，因此这类规则**不进 cron**，而是作为调度元数据存在 `cron.yaml` 的 `weekend`/`holiday` 字段（`any|only|exclude`），由 `Scheduler._runTask()` 与 `Heartbeat._runCheck()` 在触发时按 `Asia/Shanghai` 的当天日期判断是否跳过。加新的日期规则时只改这两个入口，不要去改 cron 表达式。
+
+数据来源优先级：`config/holidays.yaml`（人工维护，覆盖一切）→ `data/holidays-cache.json`（远程缓存，`/data/holidays-cache.json` 已 gitignore）→ 远程接口（缺该年份时按需拉取，3s 超时，6 小时内失败不重试）。三者都拿不到时**放行**（`known: false`）并告警，避免数据问题导致任务静默停摆。调休补班的周六日按工作日算，「排除周末」不会误杀它们。`reloadSubsystem('holiday')` 重新读取文件与缓存。
+
 ### 状态与配置即事实来源
 
 配置在运行期会被回写，写回时必须保留注释与格式：

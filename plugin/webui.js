@@ -7,6 +7,7 @@ import os from 'os';
 import { log } from 'console';
 import { isInside } from '../src/services/pathguard.js';
 import { isValidCron, cronValidationError } from '../src/services/cron-utils.js';
+import { formatDateInTz, normalizeDayRule } from '../src/services/holiday.js';
 
 /** 把工具参数（可能是 JSON 字符串）格式化成便于阅读的文本 */
 function formatToolArgs(raw) {
@@ -575,6 +576,14 @@ class WebUIService {
               error: `${label}: ${cronValidationError(task?.cron)}`,
             });
           }
+          if (!task || typeof task !== 'object') continue;
+          // 日期规则归一化；any 是默认值，不写进文件保持 YAML 干净
+          const weekend = normalizeDayRule(task.weekend);
+          const holiday = normalizeDayRule(task.holiday);
+          if (weekend === 'any') delete task.weekend;
+          else task.weekend = weekend;
+          if (holiday === 'any') delete task.holiday;
+          else task.holiday = holiday;
         }
 
         const p = path.join(process.cwd(), 'config', 'cron.yaml');
@@ -595,6 +604,58 @@ class WebUIService {
     });
 
     // ──────────────────────────────────────────
+    // 节假日日历（周末 / 法定假日规则的数据来源）
+    // ──────────────────────────────────────────
+    const resolveYear = (value) => {
+      const raw = String(value || '').trim();
+      if (/^\d{4}$/.test(raw)) return Number(raw);
+      return Number(formatDateInTz(new Date(), 'Asia/Shanghai').slice(0, 4));
+    };
+
+    this.app.get('/api/holidays', async (req, res) => {
+      const service = this.agentInstance?.holidayService;
+      const year = resolveYear(req.query.year);
+      if (!service) {
+        return res.json({ year: String(year), known: false, source: 'unavailable', holidays: 0, workdays: 0 });
+      }
+      try {
+        // ensureYear 会在缺该年份时按需拉取（有 6 小时失败记忆，不会每次点开都打网络）
+        const info = await service.ensureYear(year);
+        res.json({
+          year: String(year),
+          known: info.known,
+          source: info.source,
+          holidays: info.holidays.size,
+          workdays: info.workdays.size,
+        });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    this.app.post('/api/holidays/sync', async (req, res) => {
+      const service = this.agentInstance?.holidayService;
+      if (!service) {
+        return res.status(503).json({ success: false, error: '节假日服务未初始化' });
+      }
+      try {
+        const year = resolveYear(req.body?.year);
+        const info = await service.refreshYear(year);
+        res.json({
+          success: info.known,
+          year: String(year),
+          known: info.known,
+          source: info.source,
+          holidays: info.holidays.size,
+          workdays: info.workdays.size,
+          error: info.known ? undefined : '未能获取该年份数据（网络或接口不可用）',
+        });
+      } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+
+    // ──────────────────────────────────────────
     // Heartbeat 心跳
     // ──────────────────────────────────────────
     this.app.get('/api/heartbeat', async (req, res) => {
@@ -610,6 +671,8 @@ class WebUIService {
             ...c,
             enabled: c?.enabled !== false,
             interval: c?.interval || '',
+            weekend: normalizeDayRule(c?.weekend),
+            holiday: normalizeDayRule(c?.holiday),
           })),
           // AI 维护的动态巡检指令，必须回传给前端，否则保存时会被抹除
           dynamic_prompt: parsed?.heartbeat?.dynamic_prompt || '',
@@ -660,6 +723,13 @@ class WebUIService {
           check.enabled = raw?.enabled !== false;
           if (interval) check.interval = interval;
           else delete check.interval;
+          // 日期规则：any 作为默认值不落盘
+          const weekend = normalizeDayRule(raw?.weekend);
+          const holiday = normalizeDayRule(raw?.holiday);
+          if (weekend === 'any') delete check.weekend;
+          else check.weekend = weekend;
+          if (holiday === 'any') delete check.holiday;
+          else check.holiday = holiday;
           checks.push(check);
         }
 

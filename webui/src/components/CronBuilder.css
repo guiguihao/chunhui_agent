@@ -241,3 +241,97 @@
     word-break: break-all;
   }
 }
+
+/* ── 日期限定（周末 / 法定假日） ──
+   这两项无法进 cron，只能作为调度元数据，由后端触发时判断 */
+.cron-day-rules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.cron-day-rule {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cron-seg {
+  display: inline-flex;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.cron-seg-btn {
+  min-height: 32px;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.cron-seg-btn + .cron-seg-btn {
+  border-left: 1px solid var(--border-color);
+}
+
+.cron-seg-btn:hover {
+  color: var(--text-main);
+}
+
+.cron-seg-btn.active {
+  background: rgba(59, 130, 246, 0.25);
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.cron-note.warn {
+  flex-basis: 100%;
+  color: #fbbf24;
+}
+
+.cron-holiday-sync {
+  margin-left: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent-secondary);
+  font-family: inherit;
+  font-size: inherit;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.cron-holiday-sync:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+@media (max-width: 640px) {
+  .cron-day-rules {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .cron-seg {
+    width: 100%;
+  }
+
+  .cron-seg-btn {
+    flex: 1;
+    min-height: 40px;
+    padding: 8px 6px;
+  }
+}

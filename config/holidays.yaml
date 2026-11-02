@@ -1,0 +1,25 @@
+# 中国法定节假日与调休日历（供「排除周末 / 法定假日」规则使用）
+#
+# 优先级：本文件 > data/holidays-cache.json（远程缓存）> 远程接口
+# 本文件里写过的年份会完全覆盖其他来源；没有配置的年份会在需要时按需拉取。
+#
+# 字段说明：
+#   holidays  放假日期（法定假日，含与周末重叠的日期）
+#   workdays  调休补班日期（周六/周日但需要上班）——「排除周末」不会跳过这些天
+#
+# 示例（把 holidays: {} 替换成下面的结构即可接管某一年的数据）：
+# holidays:
+#   "2026":
+#     holidays:
+#       - 2026-01-01
+#       - 2026-01-02
+#     workdays:
+#       - 2026-01-04
+holidays: {}
+
+# 缺年份时的数据来源。接口返回 { holiday: { "01-01": { holiday: true } } }，
+# holiday=true 表示放假，false 表示调休补班。
+# 拉取失败不会阻止任务执行，只会按「无节假日数据」处理并打印告警。
+remote:
+  enabled: true
+  url: https://timor.tech/api/holiday/year/{year}

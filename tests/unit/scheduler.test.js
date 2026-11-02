@@ -69,6 +69,53 @@ describe('Scheduler 禁用任务持久化', () => {
   });
 });
 
+describe('日期规则（周末/法定假日）', () => {
+  const stubHoliday = (verdict) => ({ shouldRun: async () => verdict });
+
+  test('规则命中时跳过执行，不调用 handler', async () => {
+    let called = 0;
+    const s = new Scheduler({ holidayService: stubHoliday({ run: false, reason: 'weekend', known: true }) });
+    const ran = await s._runTask('t1', async () => { called += 1; }, { name: 'x', weekend: 'exclude' });
+    assert.equal(ran, false);
+    assert.equal(called, 0);
+  });
+
+  test('规则未命中时正常执行', async () => {
+    let called = 0;
+    const s = new Scheduler({ holidayService: stubHoliday({ run: true, reason: '', known: true }) });
+    const ran = await s._runTask('t1', async () => { called += 1; }, { name: 'x', holiday: 'exclude' });
+    assert.equal(ran, true);
+    assert.equal(called, 1);
+  });
+
+  test('规则都是 any 时不查询节假日服务', async () => {
+    let queried = 0;
+    const s = new Scheduler({
+      holidayService: { shouldRun: async () => { queried += 1; return { run: false, reason: 'x' }; } },
+    });
+    const ran = await s._runTask('t1', async () => {}, { weekend: 'any', holiday: 'any' });
+    assert.equal(ran, true);
+    assert.equal(queried, 0);
+  });
+
+  test('未注入节假日服务时保持原有行为（放行）', async () => {
+    let called = 0;
+    const s = new Scheduler();
+    const ran = await s._runTask('t1', async () => { called += 1; }, { weekend: 'exclude' });
+    assert.equal(ran, true);
+    assert.equal(called, 1);
+  });
+
+  test('listTasks 透出归一化后的日期规则', () => {
+    const s = new Scheduler();
+    s.register('r1', '0 9 * * *', async () => {}, { name: 'r', weekend: 'exclude', holiday: 'bogus' });
+    const [task] = s.listTasks();
+    assert.equal(task.weekend, 'exclude');
+    assert.equal(task.holiday, 'any', '非法值应归一化为 any');
+    s.stopAll();
+  });
+});
+
 describe('saveCronTasks 快照合并', () => {
   test('注册失败的任务不会被保存流程抹掉', () => {
     const s = new Scheduler();

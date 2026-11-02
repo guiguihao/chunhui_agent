@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import CoreAgent, { toSessionId } from './services/coreagent.js';
 import Scheduler, { mergeConfiguredTasks } from './services/scheduler.js';
 import Heartbeat from './services/heartbeat.js';
+import HolidayService from './services/holiday.js';
 import MemoryService from './services/memory.js';
 import MessengerBridge from './services/messenger.js';
 import SkillService from './services/skill.js';
@@ -79,11 +80,21 @@ class SmartHomeAgent {
     this.agent.setSkill(this.skill);
 
     // 4. 初始化调度器
-    this.scheduler = new Scheduler();
+    this.scheduler = new Scheduler({
+      timezone: this.config.agent?.timezone || 'Asia/Shanghai',
+    });
     this.agent.setScheduler(this.scheduler);
+
+    // 4.1 节假日日历：周末/法定假日规则靠它在触发时按日期判断
+    this.holidayService = new HolidayService({
+      timezone: this.config.agent?.timezone || 'Asia/Shanghai',
+    });
+    await this.holidayService.init();
+    this.scheduler.holidayService = this.holidayService;
 
     // 5. 初始化心跳
     this.heartbeat = new Heartbeat(this.agent, this.config.heartbeat);
+    this.heartbeat.setHolidayService(this.holidayService);
     // 后台任务（巡检）给紧预算：巡检要的是结论，不是无限次工具试探
     this.heartbeat.setMaxToolIterations(this._backgroundToolIterations());
     this.agent.setHeartbeat(this.heartbeat);
@@ -525,6 +536,9 @@ class SmartHomeAgent {
               prompt: t.prompt || '',
               // yaml.stringify 会自动省略 undefined，默认（skip）不会写进文件
               overlap: t.overlap,
+              // 日期规则：any 是默认值，不必写进 yaml，保持文件干净
+              weekend: t.weekend && t.weekend !== 'any' ? t.weekend : undefined,
+              holiday: t.holiday && t.holiday !== 'any' ? t.holiday : undefined,
             })),
           },
         });
@@ -678,6 +692,10 @@ class SmartHomeAgent {
 
       case 'heartbeat':
         await this.reloadHeartbeat();
+        return { reloadable: true, requiresRestart: [] };
+
+      case 'holiday':
+        await this.holidayService?.reload();
         return { reloadable: true, requiresRestart: [] };
 
       case 'env': {
