@@ -121,6 +121,10 @@ $RECYCLE.BIN/
 sessions/*
 !sessions/.gitkeep
 
+# Agent 记忆文件（运行时写入，始终为空文件，不纳入版本管理）
+memory/*
+!memory/.gitkeep
+
 # 自动化浏览器与临时媒体资产
 workspace/*
 
