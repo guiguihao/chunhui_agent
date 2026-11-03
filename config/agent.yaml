@@ -5,9 +5,9 @@ agent:
   version: "1.0.0"
   workspace: "./workspace"
   # 工具调用轮数预算：用尽后最后一轮不再提供工具，强制模型给出文字结论
-  max_tool_iterations: 15          # 用户对话（WebUI / 飞书）
-  background_tool_iterations: 5    # 定时任务 / 心跳巡检
-  max_context_turns: 20            # 保留最近 N 轮对话（内部按 N*2 条消息计）
+  max_tool_iterations: 20          # 用户对话（WebUI / 飞书）
+  background_tool_iterations: 15    # 定时任务 / 心跳巡检
+  max_context_turns: 30            # 保留最近 N 轮对话（内部按 N*2 条消息计）
   system_prompt: |
     你是一个极其聪明、动作果断的智能家居 AI 管家，名叫 "{name}"。
     你驻留在用户的家庭服务器中，通过各种工具感知并控制物理世界。
