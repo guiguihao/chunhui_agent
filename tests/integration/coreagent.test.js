@@ -112,6 +112,36 @@ describe('CoreAgent 异常持久化', () => {
   });
 });
 
+describe('CoreAgent 工具调用标记泄漏', () => {
+  // 线上真实形态：模型把 tool_calls 写成了正文里的 DSML 标记
+  const LEAK = [
+    '<｜｜DSML｜｜ calls>',
+    '<｜｜DSML｜｜ invoke name="mcp_ha-mcp_render_template">',
+    '<｜｜DSML｜｜ parameter name="template" string="true">{% for e in [1] %}{{ e }}{% endfor %}</｜｜DSML｜｜ parameter>',
+    '</｜｜DSML｜｜ invoke>',
+    '</｜｜DSML｜｜ calls>',
+  ].join('\n');
+
+  test('标记被剔除并纠偏重试，最终回复不含标记', async () => {
+    const { setScript, text } = globalThis.__coreTest;
+    setScript(text(LEAK), text('灯已关闭'));
+    const r = await mk().decide('关灯', { sessionId: 'leak_only' });
+    assert.equal(r.response, '灯已关闭');
+
+    const hist = JSON.parse(await fs.readFile(path.join(DIR, 'leak_only.json'), 'utf8'));
+    assert.ok(!JSON.stringify(hist).includes('DSML'), '会话历史里不得残留标记');
+  });
+
+  test('收敛轮仍未收敛时，兜底回复也不含标记', async () => {
+    const { setScript, text } = globalThis.__coreTest;
+    setScript(text(LEAK), text(LEAK));
+    const r = await mk().decide('关灯', { sessionId: 'leak_forever', maxToolIterations: 2 });
+    assert.ok(r.response);
+    assert.ok(!r.response.includes('DSML'), `实际: ${r.response}`);
+    assert.ok(!r.response.includes('{% for'), `实际: ${r.response}`);
+  });
+});
+
 describe('CoreAgent 会话隔离', () => {
   test('不同 sessionId 写入独立文件且不互相污染', async () => {
     const { setScript, text } = globalThis.__coreTest;

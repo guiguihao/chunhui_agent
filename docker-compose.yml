@@ -27,6 +27,12 @@ services:
       - ./data:/app/data              # 节假日缓存
       - ./.env:/app/.env              # 单文件挂载：/api/env 会改写它
       - ./.openclaw:/app/.openclaw    # 微信扫码登录态
+      # ── 源码只读挂载：改后端代码后 docker compose restart 即可，免 rebuild ──
+      # 依赖（package.json / pnpm-lock.yaml）变化时仍必须 build
+      - ./src:/app/src:ro
+      - ./plugin:/app/plugin:ro
+      - ./skills:/app/skills:ro
+      - ./README.md:/app/README.md:ro
     # user: "1000:1000"             # 宿主机普通用户跑时再打开
     stop_grace_period: 30s
     logging:

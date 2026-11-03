@@ -14,6 +14,7 @@ import {
   handleCommandTool, handleManagementTool, handleMCPToolCall, getFilePolicy,
 } from './tools/dispatcher.js';
 import { trimHistory, normalizeMessages, cleanHistory } from './session/history.js';
+import { hasToolCallMarkup, parseToolCallMarkup, stripToolCallMarkup } from './toolmarkup.js';
 
 dotenv.config();
 
@@ -558,6 +559,9 @@ class CoreAgent {
     // 缓存单次决策（决定）循环内的工具调用记录，用于检测和拦截无限重试/死循环
     const executedToolCalls = new Map();
 
+    // 纠偏只做一次：模型反复把调用写成文本时，不应把整个轮数预算耗尽
+    let leakRetryUsed = false;
+
     try {
     for (let i = 0; i < maxIterations; i++) {
       // 最后一轮不再提供工具：否则模型会一直调工具直到轮数耗尽，
@@ -565,6 +569,12 @@ class CoreAgent {
       const isLastIteration = i === maxIterations - 1;
       if (isLastIteration && tools.length > 0) {
         console.log(`[CoreAgent] 已达最大工具轮数 ${maxIterations}，本轮不再提供工具，强制收敛出结论`);
+        // 明确告知工具已不可用：否则模型会退化成把调用写成纯文本标记。
+        // 只注入本次请求的 messages（不落盘），避免下一轮会话里残留一条假「用户」指令。
+        messages.push({
+          role: 'user',
+          content: '【系统】本轮工具调用次数已用尽，工具不再可用。请仅基于上文已获得的信息，用自然语言直接给出结论；不要输出任何工具调用格式（如 <｜｜DSML｜｜...>、<tool_call>、invoke/parameter 等）。',
+        });
       }
 
       const requestOptions = {
@@ -674,9 +684,32 @@ class CoreAgent {
         }
       }
 
+      // 部分模型会把工具调用写成纯文本标记（<｜｜DSML｜｜ calls> / <tool_call> / invoke…）。
+      // 这类文本不会被执行，却会作为 content 被当成结论播报给用户。
+      // 先尝试还原成真正的 tool_calls（恢复功能），还原不了就从可见文本里剔除。
+      const rawContent = typeof choice.content === 'string' ? choice.content : '';
+      const markupDetected = hasToolCallMarkup(rawContent);
+      let leakedOnly = false;
+
+      if (markupDetected && !(choice.tool_calls && choice.tool_calls.length > 0)) {
+        // 收敛轮不再补执行工具，否则等于变相绕过工具轮数上限
+        const allowedNames = new Set(tools.map(t => t?.function?.name).filter(Boolean));
+        const parsedCalls = (!isLastIteration && tools.length > 0)
+          ? parseToolCallMarkup(rawContent).filter(c => allowedNames.has(c.function.name))
+          : [];
+
+        if (parsedCalls.length > 0) {
+          choice.tool_calls = parsedCalls.map((c, idx) => ({ ...c, id: `call_leak_${i}_${idx}` }));
+          console.warn(`[CoreAgent] 模型把工具调用写成了文本标记，已还原为真实调用: ${parsedCalls.map(c => c.function.name).join(', ')}`);
+        } else {
+          leakedOnly = true;
+          console.warn(`[CoreAgent] 回复中检测到无法执行的工具调用标记（${rawContent.length} 字符），已从可见文本中剔除`);
+        }
+      }
+
       const msgToStore = {
         role: choice.role,
-        content: choice.content,
+        content: markupDetected ? stripToolCallMarkup(rawContent) : rawContent,
       };
 
       // 思考模式：保存 reasoning_content
@@ -699,8 +732,13 @@ class CoreAgent {
         });
       }
 
-      workingHistory.push(msgToStore);
-      messages.push(msgToStore);
+      // 空内容且无工具调用的 assistant 消息不写历史：部分兼容实现会直接拒收
+      if (msgToStore.content || (msgToStore.tool_calls && msgToStore.tool_calls.length > 0)) {
+        workingHistory.push(msgToStore);
+        messages.push(msgToStore);
+      } else {
+        console.warn('[CoreAgent] 模型返回空内容且无工具调用，本条消息未写入历史');
+      }
 
       // 思考模式：输出 reasoning 日志
       if (choice.reasoning_content) {
@@ -782,10 +820,22 @@ class CoreAgent {
           messages.push(toolResult);
         }
         continue;
-      } else {
-        finalResponse = msgToStore.content || '';
-        break;
       }
+
+      // 只写标记、没有可执行调用：这不是结论。补一条纠偏提示重试，
+      // 逼模型改用标准 tool_calls，而不是把尖括号当成回答。
+      if (leakedOnly && !isLastIteration && !leakRetryUsed) {
+        leakRetryUsed = true;
+        messages.push({
+          role: 'user',
+          content: '【系统】上一轮你把工具调用写成了普通文本（<｜｜DSML｜｜...>、<tool_call>、invoke/parameter 等），这类文本不会被系统执行。请改用标准的 function calling 返回 tool_calls；如果确实不需要调用工具，就直接用自然语言作答。',
+        });
+        console.warn('[CoreAgent] 未获得可执行的工具调用，已注入纠偏提示并重试');
+        continue;
+      }
+
+      finalResponse = msgToStore.content || '';
+      break;
     }
     } catch (loopError) {
       // 决策循环异常时仍需落盘：本轮可能已执行过若干工具，
@@ -926,9 +976,14 @@ class CoreAgent {
     if (!output) return { response: '无响应' };
 
     try {
-      return JSON.parse(output);
+      const parsed = JSON.parse(output);
+      // JSON 形态也过滤一遍：标记可能藏在 response 字符串里
+      if (parsed && typeof parsed.response === 'string') {
+        parsed.response = stripToolCallMarkup(parsed.response);
+      }
+      return parsed;
     } catch {
-      return { response: output };
+      return { response: stripToolCallMarkup(output) };
     }
   }
 

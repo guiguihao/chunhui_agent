@@ -56,9 +56,13 @@ npm run setup-mcp   # 扫描 mcp/ 目录并与 config/mcporter.json 比对，只
 cp .env.example .env && vim .env   # 必填 key，chmod 600
 ./deploy/docker-up.sh              # 建状态目录 → docker compose up -d --build → 轮询 /api/health
 ./deploy/docker-up.sh --no-build   # 交叉构建并 docker load 之后用
+./deploy/docker-sync.sh user@host  # 日常增量更新：rsync → restart → 健康检查（不改依赖时免 rebuild）
+./deploy/docker-sync.sh user@host --build   # 依赖 / Dockerfile 变更时才重建
 ```
 
 `Dockerfile` 只装后端（`webui` 已被 `.dockerignore` 排除，由同机 nginx 托管 `dist`）；`docker-compose.yml` 用 `network_mode: host`，这样 `config/mcporter.json` 里的 `127.0.0.1:8123`（HA）无需改动。约束：**单实例**（会话锁在进程内、飞书/微信长连接不能多副本）；`config`/`memory`/`sessions`/`workspace`/`data`/`.env`/`.openclaw` 必须挂卷且可写，否则 WebUI 回写会 500、重启丢记忆。host 网络下 8080 无鉴权，需防火墙只放行 nginx。
+
+`src`/`plugin`/`skills`/`README.md` 另有只读卷挂载，因此改后端代码只需 `docker compose restart`（**不是** `/api/restart`：进程内软重启不会重新求值已 import 的 ESM 模块）。改动 `volumes`/`network_mode` 等 compose 字段后必须 `docker compose up -d`，`restart` 不生效。
 
 
 ## 架构总览

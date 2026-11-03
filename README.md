@@ -142,12 +142,43 @@ cp .env.example .env && vim .env                          # 填 API Key
 | `.openclaw/` | `/app/.openclaw` | 微信扫码登录态 | 可选 |
 
 ```bash
-# 备份
+# 备份（cron 每日一次即可）
 tar czf /backup/ureal-$(date +%F).tgz -C /opt/urealagent config memory sessions .env
-
-# 更新（改代码后）
-git pull && docker compose up -d --build agent
 ```
+
+### 日常更新（改代码后，免 rebuild）
+
+`src/`、`plugin/`、`skills/`、`README.md` 已以**只读卷**挂载进容器，所以改后端代码不需要重新构建镜像，同步文件后重启进程即可：
+
+```bash
+# 本地执行：同步 → 远程 restart → 健康检查（失败自动打印日志）
+./deploy/docker-sync.sh user@board
+
+# 依赖或 Dockerfile 变了才需要重建
+./deploy/docker-sync.sh user@board --build
+```
+
+等价的手工命令：
+
+```bash
+rsync -avz ./src ./plugin ./skills ./deploy ./README.md ./Dockerfile ./docker-compose.yml \
+  ./package.json ./pnpm-lock.yaml user@board:/opt/urealagent/
+ssh user@board 'cd /opt/urealagent && docker compose restart agent'
+```
+
+改动类型与动作对照：
+
+| 改动内容 | 需要做什么 | 耗时 |
+| --- | --- | --- |
+| `skills/**`（`SKILL.md` 或 `*.js`） | 无需重启：md 技能每次执行重新读文件，js 技能按 `mtimeMs` 动态 import | 0 |
+| `src/**`、`plugin/**` | `docker compose restart agent` | ~5s |
+| `config/*.yaml`、`.env` | 重启进程，或直接在 WebUI 里改（部分走 `reloadSubsystem` 热重载） | ~5s |
+| `memory/*.md` | 无需重启，下一轮对话自动读取 | 0 |
+| `package.json` / `pnpm-lock.yaml` / `Dockerfile` | **必须重建**：`./deploy/docker-sync.sh user@board --build` | 5–15min |
+
+> ⚠️ 首次应用只读挂载（或任何 `volumes` / `network_mode` 改动）必须用 `docker compose up -d` 重建容器，`restart` 不会应用 compose 文件本身的变更。
+>
+> ⚠️ WebUI 的 `/api/restart` 是**进程内软重启**（`src/agent.js` 的 `restart()`），已 import 的 ESM 模块不会重新求值，因此改 `src/` 后必须重启容器，而不仅仅是点重启。
 
 ### 小内存 / ARM 设备交叉构建
 
