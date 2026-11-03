@@ -1,0 +1,36 @@
+# ureal SmartHome Agent 生产编排
+#
+# 同机部署（前端 nginx 容器 + 本服务同一台机器）：
+#   docker compose up -d --build
+#
+# 说明：
+# - network_mode: host 让容器复用宿主机网络，config/mcporter.json 里的
+#   127.0.0.1:8123（Home Assistant）无需改动即可连通；
+# - 因此 8080 也直接暴露在宿主机上，务必用防火墙拦住（见 README「Docker 部署」）；
+# - 只支持 1 个实例：CoreAgent 的会话锁在进程内，多副本会并发写同一份 sessions/*.json，
+#   飞书 / 微信长连接也会重复回复。
+
+services:
+  agent:
+    build: .
+    image: ureal-agent:latest
+    container_name: ureal-agent
+    restart: unless-stopped
+    init: true                  # 与镜像内 tini 二选一即可，共存无害
+    network_mode: host          # 同机部署：nginx 反代 127.0.0.1:8080
+    platform: linux/arm64       # RK3528；在 x86 上构建时删掉此行
+    volumes:
+      - ./config:/app/config          # 必须可写：WebUI 会回写 agent.yaml / cron.yaml
+      - ./memory:/app/memory          # 长期记忆
+      - ./sessions:/app/sessions      # 会话历史
+      - ./workspace:/app/workspace    # Agent 产出沙箱
+      - ./data:/app/data              # 节假日缓存
+      - ./.env:/app/.env              # 单文件挂载：/api/env 会改写它
+      - ./.openclaw:/app/.openclaw    # 微信扫码登录态
+    # user: "1000:1000"             # 宿主机普通用户跑时再打开
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

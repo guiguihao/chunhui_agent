@@ -50,6 +50,17 @@ node --test --test-name-pattern="cron" tests/unit/cron-utils.test.js   # 单用�
 npm run setup-mcp   # 扫描 mcp/ 目录并与 config/mcporter.json 比对，只读不改配置
 ```
 
+**部署（Docker，生产）**
+
+```bash
+cp .env.example .env && vim .env   # 必填 key，chmod 600
+./deploy/docker-up.sh              # 建状态目录 → docker compose up -d --build → 轮询 /api/health
+./deploy/docker-up.sh --no-build   # 交叉构建并 docker load 之后用
+```
+
+`Dockerfile` 只装后端（`webui` 已被 `.dockerignore` 排除，由同机 nginx 托管 `dist`）；`docker-compose.yml` 用 `network_mode: host`，这样 `config/mcporter.json` 里的 `127.0.0.1:8123`（HA）无需改动。约束：**单实例**（会话锁在进程内、飞书/微信长连接不能多副本）；`config`/`memory`/`sessions`/`workspace`/`data`/`.env`/`.openclaw` 必须挂卷且可写，否则 WebUI 回写会 500、重启丢记忆。host 网络下 8080 无鉴权，需防火墙只放行 nginx。
+
+
 ## 架构总览
 
 ### 组合根：`src/agent.js`

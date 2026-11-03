@@ -1,0 +1,26 @@
+# 依赖与构建产物
+node_modules
+webui
+
+# 版本库与本地环境
+.git
+.env
+.env.*
+!.env.example
+
+# 运行时状态（一律走 volume，不进镜像）
+sessions
+data/holidays-cache.json
+workspace/reports
+workspace/selfcheck
+workspace/media
+workspace/browser-profile
+workspace/assets
+
+# 测试与杂项
+tests
+*.log
+.DS_Store
+Dockerfile
+.dockerignore
+docker-compose.yml

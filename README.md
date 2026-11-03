@@ -109,6 +109,93 @@ npm run dev
 
 ---
 
+## 🐳 Docker 部署（生产推荐）
+
+仓库自带 `Dockerfile` / `.dockerignore` / `docker-compose.yml`。**镜像内只有后端**；前端 `webui/` 由同机的 nginx 容器托管 `webui/dist`，两者通过 `network_mode: host` 共用宿主机网络。
+
+### 前置条件
+
+- Linux 服务器，`uname -m` 为 `aarch64` 或 `x86_64`（官方 `node:22` 无 32 位 ARM 镜像）
+- Docker 与 Compose v2
+- nginx 容器与 agent 同机（`config/mcporter.json` 里 HA 是 `127.0.0.1:8123`，靠 host 网络直通）
+
+### 一键部署
+
+```bash
+git clone <repo> /opt/urealagent && cd /opt/urealagent   # 或 rsync 上传
+cp .env.example .env && vim .env                          # 填 API Key
+./deploy/docker-up.sh                                     # 建目录 → 构建 → 启动 → 健康检查
+```
+
+脚本做的事与手动等价：`mkdir -p config memory sessions workspace data .openclaw` → `docker compose up -d --build` → 轮询 `/api/health`。
+
+### 数据与状态
+
+| 宿主目录 | 容器内 | 内容 | 备份必要性 |
+| --- | --- | --- | --- |
+| `config/` | `/app/config` | agent/cron/heartbeat/plugin 配置，WebUI 会回写 | ✅ |
+| `memory/` | `/app/memory` | 长期记忆 | ✅ |
+| `sessions/` | `/app/sessions` | 会话历史 | ✅ |
+| `workspace/` | `/app/workspace` | Agent 产出沙箱 | 可选 |
+| `data/` | `/app/data` | 节假日缓存（可重新拉取） | 否 |
+| `.env` | `/app/.env` | 凭据（单文件挂载，`/api/env` 会改写） | ✅ |
+| `.openclaw/` | `/app/.openclaw` | 微信扫码登录态 | 可选 |
+
+```bash
+# 备份
+tar czf /backup/ureal-$(date +%F).tgz -C /opt/urealagent config memory sessions .env
+
+# 更新（改代码后）
+git pull && docker compose up -d --build agent
+```
+
+### 小内存 / ARM 设备交叉构建
+
+RK3528 这类 1–4GB 内存的板子直接在机上构建容易 OOM，推荐在 x86 上构建后灌入（依赖全是纯 JS，无 native 编译）：
+
+```bash
+# x86 机器
+docker run --privileged --rm tonistiigi/binfmt --install arm64
+docker buildx build --platform linux/arm64 -t ureal-agent:latest --load .
+docker save ureal-agent:latest | gzip > ureal-agent-arm64.tgz
+scp ureal-agent-arm64.tgz user@board:/tmp/
+
+# 板子
+gunzip -c /tmp/ureal-agent-arm64.tgz | docker load
+./deploy/docker-up.sh --no-build
+```
+
+机上构建则先确认 swap 可用（`free -h`），再 `DOCKER_BUILDKIT=1 docker compose build`。
+
+### nginx 反代
+
+`webui/dist` 由 nginx 容器直接托管，`/api/` 反代到宿主机 8080：
+
+```nginx
+location /api/ {
+  proxy_pass http://127.0.0.1:8080;
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header Connection '';
+  proxy_buffering off;          # /api/chat 与 /api/events 是 SSE，必须关闭缓冲
+  proxy_read_timeout 3600s;
+  chunked_transfer_encoding on;
+}
+```
+
+### ⚠️ 安全
+
+host 网络下 8080 直接落在宿主机上，而 WebUI 的 `/api/env`、`/api/file`、`/api/config` **没有任何鉴权**，能读出全部 API Key 与家庭设备信息。务必只放行 nginx 的 80/443：
+
+```bash
+sudo ufw deny 8080
+```
+
+同时保持**单实例**：`CoreAgent` 的会话锁在进程内，多副本会并发写同一份 `sessions/*.json`，飞书 / 微信长连接也会重复回复。
+
+---
+
 ## 📁 目录结构
 
 ```

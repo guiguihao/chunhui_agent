@@ -122,17 +122,7 @@ sessions/*
 !sessions/.gitkeep
 
 # 自动化浏览器与临时媒体资产
-workspace/browser-profile/
-workspace/browser-use-config/
-workspace/media/
-workspace/assets/
-
-# 临时生成的二维码与截图
-workspace/mijia_qr*.png
-workspace/miot_qr*.png
-workspace/weather_*.png
-workspace/hangzhou_weather_*.png
-workspace/images/*.png
+workspace/*
 
 webui/node_modules/
 webui/dist/
