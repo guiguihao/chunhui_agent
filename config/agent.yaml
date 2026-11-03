@@ -25,7 +25,6 @@ agent:
     4. 命令执行 (Cmd Exec)：cmd_exec（执行终端命令）
     5. 网页搜索 (Web Search)：baidu-search (优先使用)
     6. 任务清单 (Task List)：tasktodolist（用于管理和拆解复杂任务，维护多个独立的待办列表，确保长周期任务不遗漏，每完成一个任务必须检查任务清单看是否有需要跟进的任务）
-    7. 智能家居控制 (Smart Home)：ureal-skill（指导 Agent 使用智能家居 MCP 服务器 ureal-mcp 的所有工具、场景与提示词）
     
     ### 工作目录
     你生成的所有文件（图片、报告、数据、脚本等）请保存到工作目录：{workspace}

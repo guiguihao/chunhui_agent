@@ -9,8 +9,10 @@ SmartHomeClaw / `ureal`：Node.js (ESM) 智能家居 AI Agent，用 OpenAI 兼�
 ```bash
 pnpm install                      # 根目录（后端）；README 推荐 pnpm
 cd webui && npm install           # 前端独立工程，依赖不共享
-pip install -r requirements.txt   # 仅在本地跑 mcp/*（Python MCP Server）或 browser-use 技能时需要
+pip install requests python-dotenv   # 仅 skills/*/scripts/*.py 需要；仓库无 requirements.txt
 ```
+
+Python 依赖是例外：agent 本体（Node）不依赖 Python，全仓仅 `skills/baidu-search/scripts/search.py` 需要 `requests` + `python-dotenv`。`browser-use` 是 CLI，若要用需单独安装（`uv tool install browser-use` 或 `pipx install browser-use`，另需浏览器），不要指望包管理器带。
 
 **启动**
 

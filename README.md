@@ -64,13 +64,23 @@
 ### 1. 环境准备
 - Node.js >= 22.0.0（`weixin-agent-sdk` 要求，低版本会导致该渠道无法加载）
 - pnpm (推荐) 或 npm
-- Python >= 3.10 (如需使用 Python 编写的 MCP Server 或技能脚本)
+- Python >= 3.10（可选，仅 `skills/` 下的 Python 脚本需要）
 
 ### 2. 安装依赖
 ```bash
 pnpm install
 # 或 npm install
 ```
+
+Python 依赖不在包管理器内（仓库已不再维护 `requirements.txt`），仅 `baidu-search` 技能需要：
+
+```bash
+pip install requests python-dotenv
+```
+
+`skills/baidu-search/scripts/search.py` 用到 `requests` 与 `python-dotenv`；其余技能均为纯 JS / Markdown，不依赖 Python。
+
+若另行安装 `browser-use` 做浏览器自动化，注意它是命令行工具而非 Python 库，需自带浏览器二进制，安装方式以其官方文档为准。
 
 ### 3. 配置环境变量
 复制示例配置文件并填入相应的 API Key 与凭证：
@@ -123,12 +133,9 @@ urealagent_new/
 │   ├── mcporter.js              # MCPporter 客户端及工具动态发现
 │   └── webui.js                 # WebUI 后端 API 与安全服务
 ├── skills/                      # 扩展技能目录 (Markdown/JS/Python)
-│   ├── agent-browser/           # 浏览器自动化控制
 │   ├── baidu-search/            # 百度搜索调用
-│   ├── custom_gemini_action/    # 智能多媒体生成
 │   ├── tasktodolist/            # 待办清单管理
-│   ├── weather/                 # 天气与环境数据查询
-│   └── ...
+│   └── weather/                 # 天气与环境数据查询
 ├── src/                         # 核心业务源码
 │   ├── agent.js                 # 主控制程序与生命周期调度
 │   └── services/                # 核心功能服务模块
