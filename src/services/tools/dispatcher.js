@@ -417,14 +417,40 @@ export async function handleManagementTool(ctx, toolName, args = {}) {
           return toggleResult;
         }
 
-        case 'mgmt_heartbeat_get':
+        case 'mgmt_heartbeat_get': {
           if (!ctx._heartbeat) return '心跳未配置';
-          return ctx._heartbeat.getTaskContent() || '';
+          // 只回动态内容时模型无法「先查后改」静态检查项，
+          // 这里给出完整配置摘要，便于它判断要新增还是覆盖
+          return JSON.stringify({
+            enabled: ctx._heartbeat.enabled !== false,
+            interval: ctx._heartbeat.interval || '',
+            dynamic_prompt: ctx._heartbeat.getTaskContent() || '',
+            checks: (ctx._heartbeat.checks || []).map((c) => ({
+              name: c.name,
+              enabled: c.enabled !== false,
+              interval: c.interval || '',
+              weekend: c.weekend || 'any',
+              holiday: c.holiday || 'any',
+              prompt: c.prompt,
+            })),
+          }, null, 2);
+        }
 
         case 'mgmt_heartbeat_set':
           if (!ctx._heartbeat) return '心跳未配置';
           ctx._heartbeat.setTaskContent(args.content);
           return '已更新心跳任务';
+
+        case 'mgmt_heartbeat_update': {
+          if (!ctx._heartbeat) return '心跳未配置';
+          if (typeof ctx._heartbeat.applyToolPatch !== 'function') {
+            return '当前心跳实现不支持结构化更新（仅支持 mgmt_heartbeat_set）';
+          }
+          const changes = await ctx._heartbeat.applyToolPatch(args);
+          return changes.length > 0
+            ? `已更新心跳配置：${changes.join('；')}`
+            : '未做任何修改（请提供 enabled / interval / dynamic_prompt / check / remove_check 之一）';
+        }
 
         default:
           return `未知管理工具: ${toolName}`;

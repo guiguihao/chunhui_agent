@@ -31,7 +31,32 @@ const decideContext = new AsyncLocalStorage();
 // 阈值集中在此，别再散落成调用处的魔法数字。
 const MAX_HISTORY_CHARS = 30000;        // 历史超过该字符数即触发自动压缩
 const MAX_COMPRESS_INPUT_CHARS = 20000; // 单次摘要请求的输入上限（历史可能已远超模型窗口）
-const AUTO_COMPRESS_KEEP = 3;           // 自动压缩时保留的最近消息条数
+// 最近 N 条「对话消息」不参与压缩，压缩只作用于它们之前的内容。
+// 计数只算对话消息（user / 有正文的 assistant），工具消息与只带 tool_calls 的
+// 空 assistant 属于工具管道，不占额度——它们体积大、复用价值低，若计入额度，
+// 几个工具轮就能吃掉 max_context_turns，配置语义直接失真。
+// 必须显著小于条数预算 max(max_context_turns*2, 20)，否则会退化成每轮都压缩。
+const AUTO_COMPRESS_KEEP = 10;
+// 纯条数裁剪的兜底上限系数。对话预算只数对话消息，工具消息会额外占条数，
+// 所以裁剪要留余量（体积仍由 MAX_HISTORY_CHARS 与 trimHistory 的字符上限卡住）。
+const TRIM_MESSAGE_FACTOR = 4;
+
+/**
+ * 是否「承载对话内容」的消息 —— 压缩预算与保留窗口都按它计数
+ *
+ * 排除：工具结果（role=tool）、只带 tool_calls 没有正文的 assistant、压缩摘要本身。
+ * 这样配置里的 max_context_turns 才真的对应「N 轮对话」，而不是被工具消息稀释。
+ *
+ * @param {object} msg - 单条消息
+ * @returns {boolean}
+ */
+export function isDialogMessage(msg) {
+  if (!msg) return false;
+  if (msg.compressed) return false;
+  if (msg.role === 'tool' || msg.tool_call_id) return false;
+  if (msg.role === 'assistant' && !msg.content && (msg.tool_calls?.length || 0) > 0) return false;
+  return true;
+}
 
 const DEFAULT_SYSTEM_PROMPT = `You are a helpful AI assistant named "{name}". If a tool keeps failing or returns nothing new after two attempts, stop retrying and report the situation to the user instead.`;
 
@@ -459,61 +484,17 @@ class CoreAgent {
     historyCopy.push({ role: 'user', content: prompt });
 
     const maxLen = this.maxContextTurns * 2;
-    // _cleanHistory 先净化历史（去除磁盘上遗留的不完整 tool_call 序列），再裁剪长度
-    const cleanedHistory = this._cleanHistory(this._trimHistory(historyCopy, maxLen));
-    let workingHistory = cleanedHistory;
 
-    // 自动会话压缩：按「条数 + 字符数」双重预算触发
-    // 只看条数在「少而长」的会话里完全失效（3 条各 2 万字同样会爆上下文）
-    const historyChars = workingHistory.reduce((sum, m) => sum + (m.content?.length || 0), 0);
-    if (workingHistory.length > 20 || historyChars > MAX_HISTORY_CHARS) {
-      // 按回合边界切：切点落在 tool 结果上时回退到其 assistant(tool_calls)，
-      // 否则残缺序列会被 _normalizeMessages 整段丢弃，"保留的最新消息"直接消失
-      let keepFrom = Math.max(0, workingHistory.length - AUTO_COMPRESS_KEEP);
-      // 历史很短但单条极大时（如 2 条各 3 万字），至少留出可压缩的部分；
-      // 最后一条是本轮用户输入，必须原样保留
-      if (keepFrom === 0 && workingHistory.length > 1) {
-        keepFrom = workingHistory.length - 1;
-      }
-      while (keepFrom > 0 && workingHistory[keepFrom].role === 'tool') {
-        keepFrom--;
-      }
-      const olderMessages = workingHistory.slice(0, keepFrom);
-      const latestMessages = workingHistory.slice(keepFrom);
-
-      console.log(`[CoreAgent] 自动压缩触发：${workingHistory.length} 条 / ${historyChars} 字符，压缩 ${olderMessages.length} 条旧消息，保留最新 ${latestMessages.length} 条...`);
-
-      if (olderMessages.length > 0) {
-        try {
-          const summary = await this._summarizeMessages(olderMessages, turnClient, turnModel);
-
-          // 用 user 角色承载摘要（多条 system 在部分兼容实现里只取第一条），
-          // 并打上 compressed 标记：下一轮据此把「旧摘要 + 新内容」合并更新，
-          // 而不是把摘要再摘要一遍（细节逐轮衰减）
-          const prevSummary = olderMessages.find(m => m.compressed)?.content;
-          const summaryMsg = {
-            role: 'user',
-            content: prevSummary
-              ? `[对话摘要·更新] ${summary}\n（已合并此前摘要）`
-              : `[对话摘要] ${summary}`,
-            compressed: true,
-          };
-
-          workingHistory = [summaryMsg, ...latestMessages];
-          console.log(`[CoreAgent] 自动压缩完成：${olderMessages.length} 条旧消息 → 摘要，保留最新 ${latestMessages.length} 条，workingHistory.length = ${workingHistory.length}`);
-        } catch (compressErr) {
-          console.error(`[CoreAgent] 自动压缩失败: ${compressErr.message}，退化为硬截断`);
-          // 压缩失败的主因就是历史过长，原样继续会让主请求同样超窗失败；
-          // 这里退化保留最近一半（至少 6 条），并用一条占位说明补齐语义
-          const keepRecent = Math.max(6, Math.floor(workingHistory.length / 2));
-          const dropped = workingHistory.splice(0, workingHistory.length - keepRecent);
-          workingHistory.unshift({
-            role: 'user',
-            content: `[系统] 早期 ${dropped.length} 条消息因上下文超限已省略，压缩摘要生成失败。`,
-          });
-        }
-      }
-    }
+    // 先压缩、后裁剪：压缩是「有损但保留记忆」，裁剪是「纯丢弃」。
+    // 顺序反过来时压缩永远看不到超预算的历史（裁剪已先削到 maxLen），
+    // 只能退而用一个拍脑袋的 20 条阈值，结果就是工具轮稍多一点的会话每轮都压一次。
+    let workingHistory = this._cleanHistory(historyCopy);
+    workingHistory = await this._autoCompressHistory(workingHistory, maxLen, turnClient, turnModel);
+    // 裁剪是兜底：压缩预算只数对话消息，工具消息会让总条数远超 maxLen，
+    // 若仍按 maxLen 裁剪，会把刚刚保住的对话消息连带砍掉（体积另有字符上限约束）
+    workingHistory = this._cleanHistory(
+      this._trimHistory(workingHistory, maxLen * TRIM_MESSAGE_FACTOR),
+    );
 
     let systemPrompt = await this._buildSystemPrompt();
     let ctx = await this._loadMemoryContext();
@@ -1035,6 +1016,102 @@ class CoreAgent {
       sessionId: sessionId,
       response: '🆕 会话已重置，原历史已备份。',
     };
+  }
+
+  /**
+   * 自动会话压缩（有损保留）
+   *
+   * 三条铁律：
+   * 1. 触发预算只统计「上次摘要之后」的新增消息。摘要本身已承载更早的内容，
+   *    若把摘要也算进总量，摘要一旦存在就永久超阈值 → 每轮都重新摘要一次
+   *    （白花一次 LLM 调用，且上下文被反复重写，模型表现反而更差）。
+   * 2. 条数预算只数对话消息（见 isDialogMessage），工具消息不占额度；
+   *    否则几个工具轮就吃掉 max_context_turns，「保留最近 N 轮」名不副实。
+   * 3. 压缩后只留 [摘要 + 最近 AUTO_COMPRESS_KEEP 条对话]，总量立刻回落到预算以下，
+   *    不会连轮触发；最近这 N 条不参与摘要，逐字保留（含其工具消息）以保证连贯。
+   *
+   * 条数预算取 max_context_turns * 2（配置语义就是「保留最近 N 轮」），
+   * 字符预算用 MAX_HISTORY_CHARS 兜住「少而长」的会话——工具输出体积由它负责。
+   *
+   * @param {Array} history - 已清洗的历史（含本轮 user 输入）
+   * @param {number} maxLen - 条数预算
+   * @param {object} [client] - 本轮 OpenAI 客户端
+   * @param {string} [model] - 本轮模型名
+   * @returns {Promise<Array>} 压缩后的历史；未触发或失败时返回可用的历史
+   */
+  async _autoCompressHistory(history, maxLen, client = this.client, model = this.model) {
+    const summaryIdx = history.findIndex(m => m.compressed);
+    const freshStart = summaryIdx >= 0 ? summaryIdx + 1 : 0;
+    const fresh = history.slice(freshStart);
+    // 条数预算只数对话消息，工具管道消息不占额度；体积由字符预算兜住
+    const freshDialog = fresh.filter(isDialogMessage);
+    const freshChars = fresh.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+
+    const countBudget = Math.max(20, maxLen);
+
+    if (freshDialog.length <= countBudget && freshChars <= MAX_HISTORY_CHARS) {
+      return history;
+    }
+
+    // 保留窗口同样按对话条数计：工具消息随其所属回合一起保留，
+    // 否则工具密集的会话压缩后只剩两三个真实回合
+    let keepFrom = history.length;
+    let keptDialog = 0;
+    while (keepFrom > freshStart && keptDialog < AUTO_COMPRESS_KEEP) {
+      keepFrom--;
+      if (isDialogMessage(history[keepFrom])) keptDialog++;
+    }
+    // 历史很短但单条极大时（如 2 条各 3 万字），至少留出可压缩的部分；
+    // 最后一条是本轮用户输入，必须原样保留
+    if (keepFrom === 0 && history.length > 1) {
+      keepFrom = history.length - 1;
+    }
+    // 按回合边界切：切点落在 tool 结果上时回退到其 assistant(tool_calls)，
+    // 否则残缺序列会被 _normalizeMessages 整段丢弃，"保留的最新消息"直接消失
+    while (keepFrom > freshStart && history[keepFrom].role === 'tool') {
+      keepFrom--;
+    }
+
+    const olderMessages = history.slice(0, keepFrom);
+    const latestMessages = history.slice(keepFrom);
+    // 旧内容只剩上次的摘要时，再摘要一遍没有增益，还会退化成每轮都压
+    if (olderMessages.length === 0 || olderMessages.every(m => m.compressed)) {
+      return history;
+    }
+
+    console.log(`[CoreAgent] 自动压缩触发：新增 ${freshDialog.length} 条对话（共 ${fresh.length} 条消息）/ ${freshChars} 字符（预算 ${countBudget} 条对话 / ${MAX_HISTORY_CHARS} 字符），压缩 ${olderMessages.length} 条旧消息，保留最新 ${latestMessages.length} 条...`);
+
+    try {
+      const summary = await this._summarizeMessages(olderMessages, client, model);
+
+      // 用 user 角色承载摘要（多条 system 在部分兼容实现里只取第一条），
+      // 并打上 compressed 标记：下一轮据此把「旧摘要 + 新内容」合并更新，
+      // 而不是把摘要再摘要一遍（细节逐轮衰减）
+      const prevSummary = olderMessages.find(m => m.compressed)?.content;
+      const summaryMsg = {
+        role: 'user',
+        content: prevSummary
+          ? `[对话摘要·更新] ${summary}\n（已合并此前摘要）`
+          : `[对话摘要] ${summary}`,
+        compressed: true,
+      };
+
+      console.log(`[CoreAgent] 自动压缩完成：${olderMessages.length} 条旧消息 → 摘要，保留最新 ${latestMessages.length} 条，workingHistory.length = ${latestMessages.length + 1}`);
+      return [summaryMsg, ...latestMessages];
+    } catch (compressErr) {
+      console.error(`[CoreAgent] 自动压缩失败: ${compressErr.message}，退化为硬截断`);
+      // 压缩失败的主因就是历史过长，原样继续会让主请求同样超窗失败；
+      // 这里退化保留最近一半（至少 6 条），并用一条占位说明补齐语义
+      const keepRecent = Math.max(6, Math.floor(history.length / 2));
+      const cut = Math.max(0, history.length - keepRecent);
+      return [
+        {
+          role: 'user',
+          content: `[系统] 早期 ${cut} 条消息因上下文超限已省略，压缩摘要生成失败。`,
+        },
+        ...history.slice(cut),
+      ];
+    }
   }
 
   /**

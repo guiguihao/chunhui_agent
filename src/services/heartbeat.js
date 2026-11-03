@@ -160,6 +160,14 @@ class Heartbeat {
   }
 
   /**
+   * 设置整体配置变更回调（enabled / interval / checks / dynamic_prompt 落盘用）
+   * @param {Function} handler - 无参回调，写文件由 Agent 负责
+   */
+  setOnConfigChanged(handler) {
+    this._onConfigChanged = handler;
+  }
+
+  /**
    * 销毁一个 node-cron 任务
    *
    * node-cron v4 会把任务登记进全局 registry，只 stop() 只是停掉定时器、
@@ -442,6 +450,99 @@ class Heartbeat {
     if (this._onDynamicChanged) {
       this._onDynamicChanged(this.taskContent);
     }
+  }
+
+  /**
+   * AI 工具侧的结构化更新（mgmt_heartbeat_update）
+   *
+   * 此前 AI 只能改 dynamic_prompt：开关心跳、改巡检频率、增删静态检查项都得靠
+   * 用户去 WebUI 或手改 YAML。这里补上增量更新入口，语义为「只改提交的字段」，
+   * 未提交的字段一律保持原值，避免模型顺手清空。
+   *
+   * 校验失败直接抛错（dispatcher 会降级成错误文本回传），不做静默修正——
+   * 静默修正会让模型以为改成功了，实际配置与预期不一致。
+   *
+   * @param {object} patch - { enabled, interval, dynamic_prompt, check, remove_check }
+   * @returns {Promise<string[]>} 已应用的变更说明；无变更时为空数组
+   */
+  async applyToolPatch(patch = {}) {
+    const config = {};
+    const changes = [];
+
+    if (patch.enabled !== undefined) {
+      config.enabled = isTrue(patch.enabled);
+      changes.push(`enabled=${config.enabled}`);
+    }
+
+    if (patch.interval !== undefined && String(patch.interval).trim()) {
+      const interval = String(patch.interval).trim();
+      if (!isValidCron(interval)) {
+        throw new Error(`interval 非法：${cronValidationError(interval)}`);
+      }
+      config.interval = interval;
+      changes.push(`interval=${interval}`);
+    }
+
+    if (patch.dynamic_prompt !== undefined) {
+      config.dynamic_prompt = String(patch.dynamic_prompt ?? '');
+      changes.push(config.dynamic_prompt ? '已更新动态巡检内容' : '已清空动态巡检内容');
+    }
+
+    const removeName = String(patch.remove_check ?? '').trim();
+    if (removeName) {
+      const next = (this.checks || []).filter((c) => String(c.name || '').trim() !== removeName);
+      if (next.length === (this.checks || []).length) {
+        changes.push(`未找到检查项「${removeName}」，删除已跳过`);
+      } else {
+        config.checks = next;
+        changes.push(`已删除检查项「${removeName}」`);
+      }
+    }
+
+    const check = patch.check && typeof patch.check === 'object' ? patch.check : null;
+    if (check) {
+      const name = String(check.name || '').trim();
+      if (!name) throw new Error('check.name 必填（检查项名称同时作为唯一键）');
+
+      // 基于（可能刚被删除的）最新列表做 upsert，避免同一调用里删除后又被旧快照加回来
+      const list = (config.checks || this.checks || []).map((c) => ({ ...c }));
+      const idx = list.findIndex((c) => String(c.name || '').trim() === name);
+      const item = idx >= 0 ? { ...list[idx] } : { name, enabled: true };
+
+      if (check.prompt !== undefined) item.prompt = String(check.prompt);
+      if (!String(item.prompt || '').trim()) {
+        throw new Error(`检查项「${name}」缺少 prompt，无法创建/更新`);
+      }
+
+      if (check.interval !== undefined) {
+        const iv = String(check.interval).trim();
+        if (iv && !isValidCron(iv)) {
+          throw new Error(`检查项「${name}」interval 非法：${cronValidationError(iv)}`);
+        }
+        if (iv) item.interval = iv;
+        else delete item.interval; // 空串 = 继承全局
+      }
+      if (check.enabled !== undefined) item.enabled = isTrue(check.enabled);
+      // 日期规则与 WebUI 同口径：any 作为默认值不落盘
+      for (const rule of ['weekend', 'holiday']) {
+        if (check[rule] === undefined) continue;
+        const normalized = normalizeDayRule(check[rule]);
+        if (normalized === 'any') delete item[rule];
+        else item[rule] = normalized;
+      }
+
+      if (idx >= 0) list[idx] = item;
+      else list.push(item);
+      config.checks = list;
+      changes.push(`${idx >= 0 ? '已更新' : '已新增'}检查项「${name}」`);
+    }
+
+    if (Object.keys(config).length === 0) return changes;
+
+    // updateConfig 内部按内容差异判断是否重建调度，改动立即生效（无需重启进程）
+    this.updateConfig(config);
+    if (this._onConfigChanged) await this._onConfigChanged();
+    return changes;
   }
 
   /**

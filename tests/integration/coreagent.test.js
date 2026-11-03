@@ -18,11 +18,15 @@ before(async () => {
   DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'ureal-core-'));
 
   let handler = () => ({ choices: [{ message: { role: 'assistant', content: 'default' } }] });
+  let compressCalls = 0;
   server = http.createServer((req, res) => {
     let body = '';
     req.on('data', c => body += c);
     req.on('end', () => {
-      const out = handler(JSON.parse(body || '{}'));
+      const payload = JSON.parse(body || '{}');
+      // 摘要请求：统计自动压缩是否被触发的唯一可靠信号
+      if (JSON.stringify(payload.messages || []).includes('对话摘要助手')) compressCalls++;
+      const out = handler(payload);
       if (out.__httpError) {
         res.statusCode = out.__httpError;
         return res.end(JSON.stringify({ error: { message: '服务端故障' } }));
@@ -45,8 +49,19 @@ before(async () => {
     ] } }] }),
     text: (content) => ({ choices: [{ message: { role: 'assistant', content } }] }),
     httpError: (code) => ({ __httpError: code }),
+    getCompressCalls: () => compressCalls,
+    resetCompressCalls: () => { compressCalls = 0; },
   };
 });
+
+/** 预置一份会话历史，用于验证压缩触发条件 */
+async function seedSession(sessionId, count) {
+  const msgs = [];
+  for (let i = 0; i < count; i++) {
+    msgs.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: `历史消息 ${i}` });
+  }
+  await fs.writeFile(path.join(DIR, `${sessionId}.json`), JSON.stringify(msgs));
+}
 
 after(async () => {
   server?.close();
@@ -139,6 +154,108 @@ describe('CoreAgent 工具调用标记泄漏', () => {
     assert.ok(r.response);
     assert.ok(!r.response.includes('DSML'), `实际: ${r.response}`);
     assert.ok(!r.response.includes('{% for'), `实际: ${r.response}`);
+  });
+});
+
+describe('CoreAgent 自动压缩触发频率', () => {
+  test('超过 20 条但未超配置预算时不压缩（旧实现每轮都压）', async () => {
+    const { setScript, text, getCompressCalls, resetCompressCalls } = globalThis.__coreTest;
+    resetCompressCalls();
+    await seedSession('compress_skip', 24); // + 本轮 prompt = 25 条，旧阈值 >20 会触发
+    setScript(text('收到'));
+    const r = await mk().decide('继续', { sessionId: 'compress_skip' });
+    assert.equal(r.response, '收到');
+    assert.equal(getCompressCalls(), 0, '未超 max_context_turns 预算就不该额外调用摘要模型');
+  });
+
+  test('超预算时压缩一次，压缩后不再连轮重复压缩', async () => {
+    const { setScript, text, getCompressCalls, resetCompressCalls } = globalThis.__coreTest;
+    resetCompressCalls();
+    await seedSession('compress_once', 45); // + prompt = 46 > 40（默认 max_context_turns=20 → 40 条）
+    setScript(text('早前聊过开灯'), text('第一轮'), text('第二轮'));
+
+    const a = mk();
+    const r1 = await a.decide('继续', { sessionId: 'compress_once' });
+    assert.equal(r1.response, '第一轮');
+    assert.equal(getCompressCalls(), 1);
+
+    // 压缩后历史 = [摘要] + 最近 3 条，增量远低于预算 → 第二轮不得再次摘要
+    const r2 = await a.decide('再来一次', { sessionId: 'compress_once' });
+    assert.equal(r2.response, '第二轮');
+    assert.equal(getCompressCalls(), 1, '摘要一旦存在，不应每轮重新摘要');
+  });
+
+  test('工具消息不占对话额度：41 条总消息但只有 21 条对话时不压缩', async () => {
+    const { setScript, text, getCompressCalls, resetCompressCalls } = globalThis.__coreTest;
+    resetCompressCalls();
+
+    // 10 轮「问 → 空 assistant(tool_calls) → tool → 答」= 40 条消息，其中 20 条是工具管道
+    const msgs = [];
+    for (let i = 0; i < 10; i++) {
+      msgs.push({ role: 'user', content: `问 ${i}` });
+      msgs.push({
+        role: 'assistant',
+        content: null,
+        tool_calls: [{ id: `c${i}`, type: 'function', function: { name: 'x', arguments: '{}' } }],
+      });
+      msgs.push({ role: 'tool', tool_call_id: `c${i}`, content: `结果 ${i}` });
+      msgs.push({ role: 'assistant', content: `答 ${i}` });
+    }
+    await fs.writeFile(path.join(DIR, 'budget_tool.json'), JSON.stringify(msgs));
+
+    setScript(text('收到'));
+    const r = await mk().decide('继续', { sessionId: 'budget_tool' });
+    assert.equal(r.response, '收到');
+    assert.equal(getCompressCalls(), 0, '工具消息不应消耗对话额度');
+  });
+
+  test('保留窗口按对话条数计，窗口内的工具消息一并保留', async () => {
+    const { setScript, text, getCompressCalls, resetCompressCalls } = globalThis.__coreTest;
+    resetCompressCalls();
+
+    // 42 条纯对话 + 1 个工具回合（空 assistant(tool_calls) + tool + 有正文的 assistant）
+    // 对话条数 = 42 + 1 + 本轮 prompt = 44 > 40 → 触发压缩
+    const msgs = [];
+    for (let i = 0; i < 42; i++) {
+      msgs.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: `历史消息 ${i}` });
+    }
+    msgs.push({
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ id: 't1', type: 'function', function: { name: 'x', arguments: '{}' } }],
+    });
+    msgs.push({ role: 'tool', tool_call_id: 't1', content: '工具结果 1' });
+    msgs.push({ role: 'assistant', content: '工具后回答' });
+    await fs.writeFile(path.join(DIR, 'keep_window.json'), JSON.stringify(msgs));
+
+    setScript(text('旧事摘要'), text('第一轮'));
+    await mk().decide('继续', { sessionId: 'keep_window' });
+    assert.equal(getCompressCalls(), 1);
+
+    const hist = JSON.parse(await fs.readFile(path.join(DIR, 'keep_window.json'), 'utf8'));
+    assert.ok(hist[0].compressed);
+    assert.ok(
+      hist.some(m => m.role === 'tool' && m.content === '工具结果 1'),
+      '窗口内的工具消息必须和它的回合一起保留',
+    );
+    assert.ok(
+      hist.some(m => m.content === '工具后回答'),
+      '窗口内的对话消息不得被摘要吃掉',
+    );
+  });
+
+  test('压缩后保留摘要标记，且最近 10 条原文不参与压缩', async () => {
+    const hist = JSON.parse(await fs.readFile(path.join(DIR, 'compress_once.json'), 'utf8'));
+    assert.ok(hist[0].compressed, '首条必须是压缩标记的摘要');
+    assert.ok(hist[0].content.includes('早前聊过开灯'));
+
+    // 期望结构：[摘要] + 最近 10 条 + 本轮问答；回合边界回退可能多留 1~2 条
+    assert.ok(hist.length >= 11, `最近 10 条必须原样保留，实际 ${hist.length} 条`);
+    assert.ok(hist.length <= 14, `压缩后历史应显著变短，实际 ${hist.length} 条`);
+    assert.ok(
+      hist.slice(1).some(m => m.content === '历史消息 44'),
+      '倒数第一条旧消息必须逐字保留，不能被摘要吃掉',
+    );
   });
 });
 

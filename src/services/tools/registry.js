@@ -169,7 +169,7 @@ export async function getAllTools(ctx, filter = null) {
           type: 'function',
           function: {
             name: 'mgmt_heartbeat_get',
-            description: '读取当前心跳巡检的任务指令内容',
+            description: '读取心跳巡检完整配置：开关、全局 interval、动态巡检内容与所有静态检查项',
             parameters: { type: 'object', properties: {}, required: [] },
           },
         },
@@ -177,13 +177,63 @@ export async function getAllTools(ctx, filter = null) {
           type: 'function',
           function: {
             name: 'mgmt_heartbeat_set',
-            description: '修改心跳巡检任务的指令内容',
+            description: '修改心跳巡检的动态巡检指令内容（等价于 mgmt_heartbeat_update 的 dynamic_prompt）',
             parameters: {
               type: 'object',
               properties: {
                 content: { type: 'string', description: '新的心跳任务指令' },
               },
               required: ['content'],
+            },
+          },
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'mgmt_heartbeat_update',
+            description: '更新心跳巡检配置：开关巡检、修改全局间隔、按名称新增/更新静态检查项、删除检查项。只提交需要改的字段，未提交的字段保持原值',
+            parameters: {
+              type: 'object',
+              properties: {
+                enabled: { type: 'boolean', description: '是否启用心跳巡检' },
+                interval: {
+                  type: 'string',
+                  description: '全局巡检间隔，5 段 cron 表达式（如 */30 * * * *）；空字符串表示不修改',
+                },
+                dynamic_prompt: {
+                  type: 'string',
+                  description: '动态巡检指令内容；传空字符串表示清除动态巡检',
+                },
+                remove_check: {
+                  type: 'string',
+                  description: '要删除的静态检查项名称（按 name 精确匹配）',
+                },
+                check: {
+                  type: 'object',
+                  description: '按 name 新增或更新一个静态检查项；未提供的字段保持原值',
+                  properties: {
+                    name: { type: 'string', description: '检查项名称，同时作为唯一键' },
+                    prompt: { type: 'string', description: '该项的巡检指令' },
+                    interval: {
+                      type: 'string',
+                      description: '该项专属 5 段 cron；空字符串表示继承全局间隔',
+                    },
+                    enabled: { type: 'boolean', description: '是否启用该项' },
+                    weekend: {
+                      type: 'string',
+                      enum: ['any', 'only', 'exclude'],
+                      description: '周末规则：any=不限，only=仅周末，exclude=排除周末',
+                    },
+                    holiday: {
+                      type: 'string',
+                      enum: ['any', 'only', 'exclude'],
+                      description: '法定假日规则：any=不限，only=仅假日，exclude=排除假日',
+                    },
+                  },
+                  required: ['name'],
+                },
+              },
+              required: [],
             },
           },
         }
@@ -302,29 +352,31 @@ export async function getAllTools(ctx, filter = null) {
       }
     );
 
+    // 底层系统交互指令 (cmd_exec)
+    // 不挂在 skills 分支下：baidu-search / tasktodolist 等技能最终都靠它落地，
+    // 若 skills 服务缺失或初始化异常，命令执行会连带消失，而提示词里还宣称可用。
+    tools.push(
+      {
+        type: 'function',
+        function: {
+          name: 'cmd_exec',
+          description: '在服务器上执行终端命令（如运行 Python 脚本）。对于生图、浏览器自动化等耗时任务，请通过 timeout_ms 设置足够的超时时间（生图建议 600000 即 10 分钟）。',
+          parameters: {
+            type: 'object',
+            properties: {
+              command: { type: 'string', description: '要执行的完整命令字符串' },
+              timeout_ms: { type: 'number', description: '超时时间（毫秒）。默认 30000，普通 Python 脚本自动使用 120000，生图等耐时脚本建议传入 600000。' },
+              cwd: { type: 'string', description: '命令执行目录（可选）' },
+            },
+            required: ['command'],
+          },
+        },
+      }
+    );
+
     // 技能工具
     if (ctx._skillService) {
-      // 1. 保留底层系统交互指令 (cmd_exec)
-      tools.push(
-        {
-          type: 'function',
-          function: {
-            name: 'cmd_exec',
-            description: '在服务器上执行终端命令（如运行 Python 脚本）。对于生图、浏览器自动化等耗时任务，请通过 timeout_ms 设置足够的超时时间（生图建议 600000 即 10 分钟）。',
-            parameters: {
-              type: 'object',
-              properties: {
-                command: { type: 'string', description: '要执行的完整命令字符串' },
-                timeout_ms: { type: 'number', description: '超时时间（毫秒）。默认 30000，普通 Python 脚本自动使用 120000，生图等耐时脚本建议传入 600000。' },
-                cwd: { type: 'string', description: '命令执行目录（可选）' },
-              },
-              required: ['command'],
-            },
-          },
-        }
-      );
-
-      // 2. 动态映射具体技能为顶级工具
+      // 动态映射具体技能为顶级工具
       try {
         const skillList = await ctx._skillService.list();
         for (const skill of skillList) {

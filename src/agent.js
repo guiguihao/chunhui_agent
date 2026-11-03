@@ -105,6 +105,11 @@ class SmartHomeAgent {
     this.heartbeat.setOnDynamicChanged(async () => {
       await this.saveHeartbeatConfig();
     });
+    // 结构化更新（mgmt_heartbeat_update）改的是 enabled/interval/checks，
+    // 同样需要落盘，否则重启后配置回滚
+    this.heartbeat.setOnConfigChanged(async () => {
+      await this.saveHeartbeatConfig();
+    });
 
     // 设置 Cron 任务执行回调
     this.agent.setOnCronTaskExecute(async (prompt, taskConfig) => {
@@ -571,42 +576,41 @@ class SmartHomeAgent {
   }
 
   /**
-   * 将 AI 维护的动态巡检指令持久化到 config/heartbeat.yaml
+   * 将心跳运行时配置持久化到 config/heartbeat.yaml
    *
-   * 注意：heartbeat.yaml 内含大量注释掉的示例巡检项，
-   * 因此不能使用 yaml.stringify 全量重写（会丢失注释），
-   * 这里采用文本行替换的方式仅更新 dynamic_prompt 字段。
+   * 注意：heartbeat.yaml 内含大量注释掉的示例巡检项，因此不能用
+   * yaml.parse + yaml.stringify 全量重写（会丢注释）。这里用 parseDocument
+   * 保留原有注释与顺序，并且只回写真正变化的字段：
+   * 未变化的部分连节点都不替换，注释自然也不会被冲掉。
    */
   async saveHeartbeatConfig() {
     if (!this.heartbeat) return;
     try {
       const hbPath = path.join(process.cwd(), 'config', 'heartbeat.yaml');
-      let content = await fs.readFile(hbPath, 'utf8');
+      const raw = await fs.readFile(hbPath, 'utf8');
 
-      const value = this.heartbeat.getTaskContent() || '';
-      const newLine = `  dynamic_prompt: ${JSON.stringify(value)}`;
+      const doc = yaml.parseDocument(raw);
+      if (!doc.has('heartbeat')) doc.set('heartbeat', {});
 
-      if (/^[ \t]*dynamic_prompt:/m.test(content)) {
-        content = content.replace(
-          /^[ \t]*dynamic_prompt:.*$/m,
-          () => newLine // 使用函数形式，避免内容中的 $& 等被当作替换模式
-        );
-      } else if (/^[ \t]*interval:.*$/m.test(content)) {
-        // 插入到 heartbeat 块的 interval 之后
-        content = content.replace(
-          /^[ \t]*interval:.*$/m,
-          (m) => `${m}\n${newLine}`
-        );
-      } else {
-        // 兜底：没有 interval 行时，插入到 heartbeat: 之后
-        content = content.replace(
-          /^[ \t]*heartbeat:.*$/m,
-          (m) => `${m}\n${newLine}`
-        );
+      const desired = {
+        enabled: this.heartbeat.enabled !== false,
+        interval: this.heartbeat.interval || '',
+        dynamic_prompt: this.heartbeat.getTaskContent() || '',
+        checks: this.heartbeat.checks || [],
+      };
+
+      let dirty = false;
+      for (const [key, value] of Object.entries(desired)) {
+        const current = doc.getIn(['heartbeat', key]);
+        if (JSON.stringify(current === undefined ? null : current) === JSON.stringify(value)) continue;
+        doc.setIn(['heartbeat', key], value);
+        dirty = true;
       }
 
-      await fs.writeFile(hbPath, content, 'utf8');
-      console.log('[Agent] 💾 Saved heartbeat dynamic_prompt to config/heartbeat.yaml');
+      if (!dirty) return;
+
+      await fs.writeFile(hbPath, doc.toString(), 'utf8');
+      console.log('[Agent] 💾 Saved heartbeat config to config/heartbeat.yaml');
     } catch (e) {
       console.error('[Agent] Failed to save heartbeat.yaml:', e.message);
     }

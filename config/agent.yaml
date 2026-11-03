@@ -20,11 +20,13 @@ agent:
     
     ### 你的能力
     1. 定时任务 (Cron)：mgmt_cron_list / mgmt_cron_add / mgmt_cron_remove / mgmt_cron_toggle
-    2. 心跳与巡检 (Heartbeat)：mgmt_heartbeat_get / mgmt_heartbeat_set
+    2. 心跳与巡检 (Heartbeat)：mgmt_heartbeat_get / mgmt_heartbeat_set / mgmt_heartbeat_update（开关心跳、修改全局间隔、按名称增删改静态检查项）
     3. 长期记忆 (Memory)：memory_* 工具
     4. 命令执行 (Cmd Exec)：cmd_exec（执行终端命令）
-    5. 网页搜索 (Web Search)：baidu-search (优先使用)
+    5. 网页搜索与天气：baidu-search（搜索优先使用）/ weather（实时天气与预报）
     6. 任务清单 (Task List)：tasktodolist（用于管理和拆解复杂任务，维护多个独立的待办列表，确保长周期任务不遗漏，每完成一个任务必须检查任务清单看是否有需要跟进的任务）
+    7. 智能家居 (Smart Home MCP)：mcp_ 前缀工具（如 mcp_ha-mcp_*），用于查询与控制 Home Assistant 中的设备（灯、开关、传感器、空调等）。凡涉及设备状态，必须先调用这些工具查询，严禁凭印象作答
+    8. 文件读写 (File)：file_read / file_write / file_append / file_edit / file_list / file_exists / file_delete（仅限工作目录）
     
     ### 工作目录
     你生成的所有文件（图片、报告、数据、脚本等）请保存到工作目录：{workspace}

@@ -1,6 +1,7 @@
 import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import Heartbeat, { DYNAMIC_CHECK_NAME } from '../../src/services/heartbeat.js';
+import { handleManagementTool } from '../../src/services/tools/dispatcher.js';
 
 /**
  * 重点覆盖历史 bug：mgmt_heartbeat_get/set 读写的是一个无人消费的字段，
@@ -218,6 +219,102 @@ describe('Heartbeat 告警内容完整性', () => {
 
     assert.equal(received.msg, '仅一句结论');
     assert.equal(received.meta.detail, '');
+  });
+});
+
+describe('Heartbeat 结构化更新（mgmt_heartbeat_update）', () => {
+  const base = () => ({
+    enabled: false,
+    interval: '* * * * *',
+    checks: [{ name: 'A', prompt: 'p1' }],
+  });
+
+  test('按 name 更新检查项，未提交的字段保持原值', async () => {
+    const hb = mkHeartbeat({}, base());
+    const changes = await hb.applyToolPatch({
+      check: { name: 'A', interval: '*/10 * * * *', weekend: 'exclude' },
+    });
+
+    assert.ok(changes.length > 0);
+    assert.equal(hb.checks[0].prompt, 'p1', '未提交的 prompt 不能被清空');
+    assert.equal(hb.checks[0].interval, '*/10 * * * *');
+    assert.equal(hb.checks[0].weekend, 'exclude');
+  });
+
+  test('新增检查项，同名重复提交不产生副本', async () => {
+    const hb = mkHeartbeat({}, base());
+    await hb.applyToolPatch({ check: { name: 'B', prompt: 'p2' } });
+    await hb.applyToolPatch({ check: { name: 'B', prompt: 'p2x' } });
+
+    assert.equal(hb.checks.length, 2);
+    assert.equal(hb.checks.find(c => c.name === 'B').prompt, 'p2x');
+  });
+
+  test('删除检查项；删除不存在的名字会明确说明而不是静默成功', async () => {
+    const hb = mkHeartbeat({}, base());
+    await hb.applyToolPatch({ remove_check: 'A' });
+    assert.equal(hb.checks.length, 0);
+
+    const changes = await hb.applyToolPatch({ remove_check: '不存在的项' });
+    assert.match(changes.join(' '), /未找到检查项/);
+  });
+
+  test('非法 interval 抛错且不修改配置', async () => {
+    const hb = mkHeartbeat({}, base());
+    await assert.rejects(() => hb.applyToolPatch({ interval: '99 * * * *' }), /interval 非法/);
+    assert.equal(hb.interval, '* * * * *');
+
+    await assert.rejects(
+      () => hb.applyToolPatch({ check: { name: 'A', interval: '0 */5 * * * *' } }),
+      /interval 非法/,
+      '6 段表达式同样按非法处理',
+    );
+  });
+
+  test('缺 prompt 的新检查项直接拒绝', async () => {
+    const hb = mkHeartbeat({}, base());
+    await assert.rejects(() => hb.applyToolPatch({ check: { name: 'C' } }), /缺少 prompt/);
+    assert.equal(hb.checks.length, 1);
+  });
+
+  test('enabled / dynamic_prompt 一起更新：停调度并触发持久化回调', async () => {
+    let persisted = 0;
+    const hb = mkHeartbeat({}, { enabled: true, interval: '* * * * *', checks: [{ name: 'A', prompt: 'p' }] });
+    hb.setOnConfigChanged(() => { persisted += 1; });
+    hb.start();
+    assert.equal(hb.tasks.length, 1);
+
+    await hb.applyToolPatch({ enabled: false, dynamic_prompt: '巡检X' });
+
+    assert.equal(hb.enabled, false);
+    assert.equal(hb.getTaskContent(), '巡检X');
+    assert.equal(hb.tasks.length, 0, '关闭后必须停掉调度');
+    assert.equal(persisted, 1, '配置变更必须落盘');
+  });
+
+  test('没有任何可识别字段时返回空变更，不乱动配置', async () => {
+    const hb = mkHeartbeat({}, base());
+    assert.deepEqual(await hb.applyToolPatch({}), []);
+    assert.equal(hb.checks[0].prompt, 'p1');
+  });
+
+  test('dispatcher 能路由 update 并由 get 返回完整配置', async () => {
+    const hb = mkHeartbeat({}, { enabled: false, interval: '* * * * *', checks: [] });
+
+    const out = await handleManagementTool(
+      { _heartbeat: hb },
+      'mgmt_heartbeat_update',
+      { check: { name: 'C', prompt: 'pc' } },
+    );
+    assert.match(out, /已更新心跳配置/);
+
+    const snapshot = JSON.parse(
+      await handleManagementTool({ _heartbeat: hb }, 'mgmt_heartbeat_get', {}),
+    );
+    assert.equal(snapshot.enabled, false);
+    assert.equal(snapshot.interval, '* * * * *');
+    assert.equal(snapshot.checks.length, 1);
+    assert.equal(snapshot.checks[0].name, 'C');
   });
 });
 

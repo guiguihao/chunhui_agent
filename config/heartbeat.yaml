@@ -1,15 +1,14 @@
 heartbeat:
-  enabled: true
+  enabled: false
   interval: "*/50 * * * *"
   checks:
     - name: 系统告警测试
-      enabled: true
+      enabled: false
       interval: "*/20 * * * *"
       prompt: "这是一次系统功能测试。请立即报告一个安全警告，内容为'测试：消息桥接器与心跳推送功能正常'，并在返回的 JSON 中务必设置
         \"is_warning\": true。"
-    - name: 查询mcp服务是否正常
-      prompt: 查询mcp服务是否正常
-      enabled: true
-      weekend: exclude
-      holiday: exclude
+  # 动态巡检指令：由 AI 通过 mgmt_heartbeat_set / mgmt_heartbeat_update 维护，一般不必手改。
+  # 非空时按上面的 interval 周期性执行这段 prompt（会话固定为 hb_动态巡检）；
+  # 空字符串 = 关闭动态巡检，只跑上面 checks 里的静态检查项。
+  # 注意：它是单条文本，新内容整体替换旧内容，不会累加。
   dynamic_prompt: ""
