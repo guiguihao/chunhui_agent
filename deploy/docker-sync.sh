@@ -42,6 +42,14 @@ rsync -avz \
   ./package.json ./pnpm-lock.yaml \
   "$REMOTE:$DEST/"
 
+# 前端产物（webui/dist 被 gitignore，需本地 npm run build 后单独同步）
+if [[ -f ./webui/dist/index.html ]]; then
+  green "[1/3] 同步前端产物 → $REMOTE:$DEST/webui/dist"
+  rsync -avz --delete ./webui/dist "$REMOTE:$DEST/webui/"
+else
+  warn "[1/3] 未找到 webui/dist/index.html，跳过前端同步（先执行: cd webui && npm run build）"
+fi
+
 # ── 2. 远程执行 ────────────────────────────────────────────────
 if [[ "$BUILD" -eq 1 ]]; then
   green "[2/3] 重建镜像（依赖或 Dockerfile 有变更）"
@@ -59,6 +67,12 @@ if [[ "$BUILD" -eq 1 ]]; then
   DOCKER_BUILDKIT=1 docker compose up -d --build
 else
   docker compose restart agent
+  # nginx 配置是 bind mount，改了 conf 需要 reload/restart 才生效
+  if docker compose ps --status running --services 2>/dev/null | grep -qx nginx; then
+    docker compose exec -T nginx nginx -t >/dev/null 2>&1 \
+      && docker compose exec -T nginx nginx -s reload \
+      || docker compose restart nginx
+  fi
 fi
 
 for _ in $(seq 1 15); do

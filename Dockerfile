@@ -7,8 +7,9 @@ FROM node:22-bookworm-slim
 
 # python3 仅供 skills/baidu-search/scripts/search.py 使用（仓库已不再维护 requirements.txt）
 # tini：cmd_exec 会大量派生 python 子进程，PID 1 必须能正确收尸
+# tzdata：slim 基础镜像不含时区库，缺了 TZ 环境变量对 glibc localtime 不生效
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-venv tini curl ca-certificates \
+      python3 python3-venv tini curl ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production \

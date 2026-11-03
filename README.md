@@ -198,20 +198,49 @@ gunzip -c /tmp/ureal-agent-arm64.tgz | docker load
 
 机上构建则先确认 swap 可用（`free -h`），再 `DOCKER_BUILDKIT=1 docker compose build`。
 
-### nginx 反代
+### nginx（已包含在 compose 内）
 
-`webui/dist` 由 nginx 容器直接托管，`/api/` 反代到宿主机 8080：
+`docker-compose.yml` 里 `nginx` 服务与 `agent` 同栈，同样用 `network_mode: host`：
+
+| 项 | 值 |
+| --- | --- |
+| 镜像 | `nginx:alpine`（多架构，ARM 直接可用） |
+| 配置 | `deploy/nginx/ureal.conf` → `/etc/nginx/conf.d/default.conf`（只读） |
+| 站点根 | 宿主机 `webui/dist` → `/usr/share/nginx/html`（只读） |
+| 监听 | 80（如启用 TLS 则再加 443） |
+
+配置要点（完整见文件本身）：`/api/` 反代 `127.0.0.1:8080` 且 `proxy_buffering off` + `gzip off`（`/api/chat`、`/api/events` 是 SSE，缓冲会让流式回复攒到最后一次性出现）；`/assets/` 长缓存（vite 产物带内容哈希）；`/index.html` 不缓存；`location /` 走 SPA fallback。
+
+**前端产物必须先构建**（静态文件与架构无关，在本地 Mac 上 build 最快）：
+
+```bash
+cd webui && npm install && npm run build     # 产出 webui/dist
+rsync -avz --delete ./webui/dist user@board:/opt/urealagent/webui/
+```
+
+之后 `./deploy/docker-sync.sh user@board` 会自动带上 `webui/dist`（已构建时），并在同步后 reload nginx。
+
+**端口冲突**：两个容器都用 host 网络，nginx 直接占用宿主机 80/443。如果之前单独跑过 nginx 容器，先停掉：
+
+```bash
+docker ps --format '{{.Names}}\t{{.Ports}}' | grep ':80'
+docker rm -f <旧nginx容器名>
+```
+
+启用 HTTPS 时在 `ureal.conf` 里补一个 443 的 server 块，并把证书目录挂进来（compose 里已留注释位）：
 
 ```nginx
-location /api/ {
-  proxy_pass http://127.0.0.1:8080;
-  proxy_http_version 1.1;
-  proxy_set_header Host $host;
-  proxy_set_header X-Real-IP $remote_addr;
-  proxy_set_header Connection '';
-  proxy_buffering off;          # /api/chat 与 /api/events 是 SSE，必须关闭缓冲
-  proxy_read_timeout 3600s;
-  chunked_transfer_encoding on;
+server {
+    listen 443 ssl;
+    server_name your.domain.com;
+
+    ssl_certificate     /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # 其余 location（/api/、/assets/、/）与 80 端口那份保持一致
 }
 ```
 
@@ -250,6 +279,10 @@ urealagent_new/
 │   ├── weixin.js                # 微信渠道（长轮询 + 扫码登录 + 主动推送）
 │   ├── mcporter.js              # MCPporter 客户端及工具动态发现
 │   └── webui.js                 # WebUI 后端 API 与安全服务
+├── deploy/                      # 部署脚本与 nginx 配置
+│   ├── docker-up.sh             # 一键部署（建目录 → build → 健康检查）
+│   ├── docker-sync.sh           # 增量更新（rsync → restart，免 rebuild）
+│   └── nginx/ureal.conf         # 前端静态托管 + /api 反代
 ├── skills/                      # 扩展技能目录 (Markdown/JS/Python)
 │   ├── baidu-search/            # 百度搜索调用
 │   ├── tasktodolist/            # 待办清单管理
@@ -268,6 +301,8 @@ urealagent_new/
 ├── scripts/                     # 运维辅助与配置检查脚本
 │   └── setup-mcp.js             # MCP Server 状态验证脚本
 ├── .env.example                 # 环境变量模板
+├── Dockerfile                   # 后端镜像（node:22-slim + python venv）
+├── docker-compose.yml           # agent + nginx 两服务编排（host 网络）
 ├── package.json
 └── README.md
 ```

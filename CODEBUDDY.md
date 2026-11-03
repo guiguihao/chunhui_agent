@@ -60,7 +60,7 @@ cp .env.example .env && vim .env   # 必填 key，chmod 600
 ./deploy/docker-sync.sh user@host --build   # 依赖 / Dockerfile 变更时才重建
 ```
 
-`Dockerfile` 只装后端（`webui` 已被 `.dockerignore` 排除，由同机 nginx 托管 `dist`）；`docker-compose.yml` 用 `network_mode: host`，这样 `config/mcporter.json` 里的 `127.0.0.1:8123`（HA）无需改动。约束：**单实例**（会话锁在进程内、飞书/微信长连接不能多副本）；`config`/`memory`/`sessions`/`workspace`/`data`/`.env`/`.openclaw` 必须挂卷且可写，否则 WebUI 回写会 500、重启丢记忆。host 网络下 8080 无鉴权，需防火墙只放行 nginx。
+`Dockerfile` 只装后端（`webui` 已被 `.dockerignore` 排除）；`docker-compose.yml` 有 `agent` + `nginx` 两个服务，都用 `network_mode: host`，因此 nginx 的 `proxy_pass` 可直写 `127.0.0.1:8080`，agent 也能直连 `config/mcporter.json` 里的 `127.0.0.1:8123`（HA）。nginx 配置在 `deploy/nginx/ureal.conf`，站点根挂宿主 `webui/dist`（需本地 `npm run build` 后同步）。约束：**单实例**（会话锁在进程内、飞书/微信长连接不能多副本）；`config`/`memory`/`sessions`/`workspace`/`data`/`.env`/`.openclaw` 必须挂卷且可写，否则 WebUI 回写会 500、重启丢记忆。host 网络下 8080 无鉴权，需防火墙只放行 nginx 的 80/443。
 
 `src`/`plugin`/`skills`/`README.md` 另有只读卷挂载，因此改后端代码只需 `docker compose restart`（**不是** `/api/restart`：进程内软重启不会重新求值已 import 的 ESM 模块）。改动 `volumes`/`network_mode` 等 compose 字段后必须 `docker compose up -d`，`restart` 不生效。
 

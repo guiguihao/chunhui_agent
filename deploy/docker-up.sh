@@ -46,6 +46,13 @@ if [[ ! -f .env ]]; then
 fi
 green "[2/4] 已存在 .env（如刚改过，可继续；改动会在下次重启生效）"
 
+# 前端产物：nginx 服务挂载 webui/dist，缺了会 404
+if [[ ! -f webui/dist/index.html ]]; then
+  warn "[2/4] 未找到 webui/dist/index.html —— nginx 将返回 404"
+  warn "      本地执行: cd webui && npm install && npm run build"
+  warn "      然后同步: rsync -avz ./webui/dist user@board:$ROOT/webui/"
+fi
+
 # ── 4. 构建并启动 ─────────────────────────────────────────────
 if [[ "$NO_BUILD" -eq 1 ]]; then
   green "[3/4] 跳过构建（--no-build）"
