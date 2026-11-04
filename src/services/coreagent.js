@@ -105,6 +105,25 @@ export function toSessionId(prefix, raw) {
   return slug ? `${prefix}_${slug}` : prefix;
 }
 
+/**
+ * 有 apiKey 才算「可用配置」
+ *
+ * OpenAI SDK 在 apiKey 为空时抛的是
+ * "Missing credentials. Please pass an `apiKey`, `workloadIdentity`, `adminAPIKey`..."
+ * ——既不说哪个 provider，也不说缺哪个环境变量，部署时几乎无法定位。
+ * 因此这里提前把空 key 的配置剔除，并在全空时自己抛出带变量名的错误。
+ */
+const hasCredentials = (c) => Boolean(c && c.apiKey);
+
+/** 生成「缺哪个变量」的清单，用于启动失败的报错文案 */
+const describeMissingCredentials = (configs = []) => configs.map((c) => {
+  const envName = c.apiKeyEnv || 'OPENAI_API_KEY';
+  return `  - ${c.providerName || '未知 provider'} / ${c.model || '未知模型'}：需要环境变量 ${envName}（当前为空）`;
+}).join('\n');
+
+/** 从 .env.example 复制后忘记改的占位值：能过启动，但请求必被鉴权拒绝 */
+const PLACEHOLDER_KEY_RE = /^(your[_-].*|changeme|placeholder|xxx+)$/i;
+
 class CoreAgent {
   constructor(modelConfig = {}) {
     this.name = modelConfig.name || 'ureal';
@@ -115,25 +134,72 @@ class CoreAgent {
     // 同步重启会让用户只看到"连接被中断"
     this.restartDelayMs = modelConfig.restartDelayMs ?? 2500;
     this.sessionDir = modelConfig.sessionDir || './sessions';
-    this.primaryConfigs = modelConfig.primaryConfigs || [];
-    if (this.primaryConfigs.length === 0 && modelConfig.model) {
+    const declaredPrimary = modelConfig.primaryConfigs || [];
+    if (declaredPrimary.length === 0 && modelConfig.model) {
       // backward compatibility
-      this.primaryConfigs.push({
+      declaredPrimary.push({
         model: modelConfig.model,
         baseUrl: modelConfig.baseUrl,
         apiKey: modelConfig.apiKey,
+        apiKeyEnv: modelConfig.apiKeyEnv,
         thinking: modelConfig.thinking,
         stream: modelConfig.stream
       });
     }
+
+    this.fallbackConfigs = modelConfig.fallbackConfigs || [];
+    if (modelConfig.fallback) {
+      this.fallbackConfigs.push(modelConfig.fallback);
+    }
+    // fallback 同样不能带空 key：切过去的一瞬间就会失败，等于没有兜底
+    this.fallbackConfigs = this.fallbackConfigs.filter(hasCredentials);
+
+    // 空 key 的配置留在轮询里只会把错误推迟到运行时，这里先剔除并告警
+    const skippedPrimary = declaredPrimary.filter((c) => !hasCredentials(c));
+    if (skippedPrimary.length > 0) {
+      console.warn(
+        `[CoreAgent] ⚠ 跳过 ${skippedPrimary.length} 个缺少 API Key 的主模型配置：\n`
+        + describeMissingCredentials(skippedPrimary),
+      );
+    }
+    this.primaryConfigs = declaredPrimary.filter(hasCredentials);
+
+    // 主模型全军覆没时退到有 key 的 fallback：服务至少要能起来，否则 WebUI 也无法用于排查
+    if (this.primaryConfigs.length === 0 && this.fallbackConfigs.length > 0) {
+      console.warn(
+        '[CoreAgent] ⚠ 主模型均不可用，临时改用 fallback 模型：'
+        + this.fallbackConfigs.map((c) => c.model).join(', '),
+      );
+      this.primaryConfigs = [...this.fallbackConfigs];
+    }
+
+    if (this.primaryConfigs.length === 0) {
+      const detail = declaredPrimary.length
+        ? describeMissingCredentials(declaredPrimary)
+        : '  - 未配置任何模型（config/agent.yaml 的 models.default 为空）';
+      throw new Error(
+        '缺少可用的模型 API Key，服务无法启动。\n'
+        + `请在 .env 中补齐对应变量后重启：\n${detail}`,
+      );
+    }
+
+    for (const c of [...this.primaryConfigs, ...this.fallbackConfigs]) {
+      if (PLACEHOLDER_KEY_RE.test(String(c.apiKey).trim())) {
+        console.warn(
+          `[CoreAgent] ⚠ ${c.providerName || '未知 provider'} 的 API Key 仍是占位值`
+          + `（${c.apiKeyEnv || 'OPENAI_API_KEY'}），请求会被鉴权拒绝，请填入真实值`,
+        );
+      }
+    }
+
     this.currentPrimaryIndex = 0;
 
-    const initPrimary = this.primaryConfigs[0] || {};
+    const initPrimary = this.primaryConfigs[0];
     console.log(`[CoreAgent] Initialized with primary model=${initPrimary.model}, baseUrl=${initPrimary.baseUrl}`);
 
     this.client = new OpenAI({
       baseURL: initPrimary.baseUrl || modelConfig.baseUrl,
-      apiKey: initPrimary.apiKey || modelConfig.apiKey,
+      apiKey: initPrimary.apiKey,
       timeout: modelConfig.timeout || 60000,
       defaultHeaders: {
         'User-Agent': 'curl/8.7.1',
@@ -142,10 +208,6 @@ class CoreAgent {
     this.model = initPrimary.model || modelConfig.model;
     this.thinking = initPrimary.thinking || modelConfig.thinking || false;
     this.stream = initPrimary.stream || modelConfig.stream || false;
-    this.fallbackConfigs = modelConfig.fallbackConfigs || [];
-    if (modelConfig.fallback) {
-      this.fallbackConfigs.push(modelConfig.fallback);
-    }
 
     if (this.fallbackConfigs.length > 0) {
       console.log(`[CoreAgent] ${this.fallbackConfigs.length} fallback model(s) available.`);
@@ -299,24 +361,34 @@ class CoreAgent {
       this.maxContextTurns = Number(newModelConfig.maxContextTurns);
     }
     if (newModelConfig.primaryConfigs && newModelConfig.primaryConfigs.length > 0) {
-      this.primaryConfigs = newModelConfig.primaryConfigs;
-      this.currentPrimaryIndex = 0;
-      const initPrimary = this.primaryConfigs[0] || {};
-      this.model = initPrimary.model;
-      this.thinking = initPrimary.thinking || false;
-      this.stream = initPrimary.stream || false;
-      this.client = new OpenAI({
-        baseURL: initPrimary.baseUrl,
-        apiKey: initPrimary.apiKey,
-        timeout: 60000,
-        defaultHeaders: {
-          'User-Agent': 'curl/8.7.1',
-        },
-      });
-      console.log(`[CoreAgent] Model config reloaded: primary=${this.model}`);
+      // 热更新遇到全部缺 key（典型是 .env 被改错）时保持旧配置：
+      // 重建一个 apiKey 为空的 client 会让下一轮对话直接抛 Missing credentials
+      const usable = newModelConfig.primaryConfigs.filter(hasCredentials);
+      if (usable.length === 0) {
+        console.warn(
+          '[CoreAgent] ⚠ 新配置里没有任何可用的模型 API Key，忽略本次热更新（沿用旧配置）：\n'
+          + describeMissingCredentials(newModelConfig.primaryConfigs),
+        );
+      } else {
+        this.primaryConfigs = usable;
+        this.currentPrimaryIndex = 0;
+        const initPrimary = usable[0];
+        this.model = initPrimary.model;
+        this.thinking = initPrimary.thinking || false;
+        this.stream = initPrimary.stream || false;
+        this.client = new OpenAI({
+          baseURL: initPrimary.baseUrl,
+          apiKey: initPrimary.apiKey,
+          timeout: 60000,
+          defaultHeaders: {
+            'User-Agent': 'curl/8.7.1',
+          },
+        });
+        console.log(`[CoreAgent] Model config reloaded: primary=${this.model}`);
+      }
     }
-    if (newModelConfig.fallbackConfigs) {
-      this.fallbackConfigs = newModelConfig.fallbackConfigs;
+    if (Array.isArray(newModelConfig.fallbackConfigs)) {
+      this.fallbackConfigs = newModelConfig.fallbackConfigs.filter(hasCredentials);
     }
     this._readmeCache = null; // 刷新 README 缓存
   }

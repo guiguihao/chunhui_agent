@@ -476,6 +476,8 @@ class SmartHomeAgent {
         model: matchedModelConfig.id,
         baseUrl: matched.base_url,
         apiKey: apiKey,
+        // 仅用于启动校验的报错文案（「缺哪个环境变量」比 SDK 的 Missing credentials 有用得多）
+        apiKeyEnv,
         thinking: matchedModelConfig.thinking || false,
         stream: matchedModelConfig.stream || false,
         providerName: matched.name
@@ -494,6 +496,7 @@ class SmartHomeAgent {
         model: 'gpt-4o',
         baseUrl: 'https://api.openai.com/v1',
         apiKey: process.env.OPENAI_API_KEY || '',
+        apiKeyEnv: 'OPENAI_API_KEY',
         thinking: false,
         stream: false,
         providerName: 'openai'
