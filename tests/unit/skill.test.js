@@ -85,3 +85,55 @@ export default async function run(agent, params) { n += 1; return { calls: n }; 
     }
   });
 });
+
+describe('SkillService 禁用名单', () => {
+  const mkDir = async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'sk-dis-'));
+    await fs.mkdir(path.join(dir, 'demo'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'demo', 'SKILL.md'),
+      '---\nname: demo\ndescription: 演示技能\n---\n\n正文\n', 'utf8');
+    await fs.writeFile(path.join(dir, 'helper.js'),
+      'export default async () => ({ ok: true });', 'utf8');
+    return dir;
+  };
+
+  test('禁用项不进入 list()，但 listAll/has 仍可见', async () => {
+    const dir = await mkDir();
+    try {
+      const svc = new SkillService({ directory: dir, disabled: ['demo'] });
+      await svc.init();
+
+      assert.deepEqual((await svc.list()).map(s => s.name), ['helper'], '禁用技能不得注册为工具');
+      assert.deepEqual((await svc.listAll()).map(s => s.name).sort(), ['demo', 'helper']);
+      assert.equal(await svc.has('demo'), true, 'has() 含禁用项，便于开关工具校验拼写');
+      assert.deepEqual(svc.getDisabled(), ['demo']);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('run() 拒绝调用被禁用的技能', async () => {
+    const dir = await mkDir();
+    try {
+      const svc = new SkillService({ directory: dir, disabled: ['helper'] });
+      await svc.init();
+      await assert.rejects(() => svc.run('helper', {}, null), /已被禁用/);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('setDisabled([]) 全部解禁', async () => {
+    const dir = await mkDir();
+    try {
+      const svc = new SkillService({ directory: dir, disabled: ['demo', 'helper'] });
+      await svc.init();
+      assert.equal((await svc.list()).length, 0);
+
+      svc.setDisabled([]);
+      assert.equal((await svc.list()).length, 2);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});

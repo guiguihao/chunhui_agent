@@ -9,6 +9,23 @@ import yaml from 'yaml';
 class SkillService {
   constructor(config = {}) {
     this.directory = path.resolve(process.cwd(), config.directory || './skills');
+    // 运行时禁用名单（持久化在 agent.yaml 的 agent.skills.disabled）。
+    // 禁用只是"不注册工具 + 不允许派发"，技能文件本身不动——
+    // 删除目录属于破坏性操作，不交给模型做。
+    this.disabled = new Set((config.disabled || []).map((n) => String(n)));
+  }
+
+  /**
+   * 覆盖禁用名单
+   * @param {string[]} names - 技能名数组，空数组表示全部解禁
+   */
+  setDisabled(names = []) {
+    this.disabled = new Set((names || []).map((n) => String(n)));
+  }
+
+  /** 当前禁用名单 */
+  getDisabled() {
+    return [...this.disabled];
   }
 
   async init() {
@@ -37,9 +54,9 @@ class SkillService {
   }
 
   /**
-   * 列出所有可用技能
+   * 列出目录中的全部技能（含被禁用项，供管理工具展示）
    */
-  async list() {
+  async listAll() {
     try {
       const entries = await fs.readdir(this.directory, { withFileTypes: true });
       const skills = [];
@@ -70,6 +87,24 @@ class SkillService {
       console.error('[Skill] List skills error:', error.message);
       return [];
     }
+  }
+
+  /**
+   * 列出可用技能（已剔除禁用项）
+   * 禁用项不参与工具注册，也不参与派发（dispatcher 通过 list() 找技能）
+   */
+  async list() {
+    return (await this.listAll()).filter((s) => !this.disabled.has(s.name));
+  }
+
+  /**
+   * 技能是否存在（含已禁用项，用于管理工具校验拼写）
+   * @param {string} name
+   * @returns {Promise<boolean>}
+   */
+  async has(name) {
+    const target = String(name);
+    return (await this.listAll()).some((s) => s.name === target);
   }
 
   /**
@@ -157,6 +192,11 @@ class SkillService {
    * 执行指定技能
    */
   async run(name, params = {}, agent) {
+    // 防御：正常派发前会经 list() 过滤，这里兜住直接调用（如旧会话里的工具名）
+    if (this.disabled.has(String(name))) {
+      throw new Error(`Skill "${name}" 已被禁用，请先通过 mgmt_skill_toggle 启用`);
+    }
+
     const foundPath = await this._resolveSkillPath(name);
 
     if (!foundPath) throw new Error(`Skill "${name}" not found`);

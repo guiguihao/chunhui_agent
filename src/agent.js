@@ -67,6 +67,17 @@ class SmartHomeAgent {
     this.agent.setMemory(this.memory);
     await this.agent.init();
 
+    // 工具改动了「启动时才固化」的配置（目前是 MCP Server）后，会在本轮回复送达后
+    // 请求软重启：restart() 会重建 MCP 连接，等价于在 WebUI 点"重启"——
+    // 但绝不能在工具调用中途同步执行，否则当前这轮回复连同 SSE/飞书连接一起断。
+    this.agent.setOnRestartRequested(async (reason) => {
+      console.log(`[Agent] ♻️  Restart requested by tool: ${reason}`);
+      const r = await this.restart();
+      if (!r?.success && !r?.skipped) {
+        console.error('[Agent] 工具触发的重启失败:', r?.error);
+      }
+    });
+
     // 设置工作目录
     const workspaceDir = path.resolve(process.cwd(), this.config.agent?.workspace || './workspace');
     await fs.mkdir(workspaceDir, { recursive: true });
@@ -80,6 +91,12 @@ class SmartHomeAgent {
     const loadedSkills = await this.skill.list();
     console.log(`[Agent] SkillService initialized. ${loadedSkills.length} skill(s) loaded: ${loadedSkills.map(s => s.name).join(', ')}`);
     this.agent.setSkill(this.skill);
+
+    // AI 通过 mgmt_skill_toggle 维护的禁用名单持久化到 agent.yaml 的 agent.skills.disabled。
+    // 禁用状态由 dispatcher 直接改 SkillService（立即生效），这里只负责落盘。
+    this.agent.setOnSkillsChanged(async (names) => {
+      await this.saveSkillsDisabled(names);
+    });
 
     // 4. 初始化调度器
     this.scheduler = new Scheduler({
@@ -168,6 +185,8 @@ class SmartHomeAgent {
     // 7. 初始化 MCPorter 服务
     if (this.config.plugins?.mcporter?.enabled) {
       this.mcporter = new MCPorterService(this.config.plugins.mcporter, this.agent);
+      // 注：mgmt_mcp_list/toggle/remove 由 dispatcher 直接读写 config/mcporter.json
+      // （与 WebUI /api/mcp 同一事实来源），不需要经这里落盘。
     }
 
     // 8. 初始化 WebUI 服务
@@ -614,6 +633,30 @@ class SmartHomeAgent {
     } catch (e) {
       console.error('[Agent] Failed to save heartbeat.yaml:', e.message);
     }
+  }
+
+  /**
+   * 持久化技能禁用名单到 config/agent.yaml 的 agent.skills.disabled
+   *
+   * agent.yaml 含长文本 system_prompt，必须用 parseDocument 保留块样式与注释；
+   * 实测 round-trip 后 system_prompt 逐字一致。
+   *
+   * 注意：WebUI 的 /api/config 用 patchScalar 按行文本替换改同一个文件，
+   * 两者并发会互相覆盖；这里只在值真的变化时才写，把冲突面缩到最小。
+   *
+   * @param {string[]} names - 被禁用的技能名
+   */
+  async saveSkillsDisabled(names) {
+    const p = path.join(process.cwd(), 'config', 'agent.yaml');
+    const raw = await fs.readFile(p, 'utf8');
+    const doc = yaml.parseDocument(raw);
+    const current = doc.getIn(['agent', 'skills', 'disabled']);
+    if (JSON.stringify(current === undefined ? [] : current) === JSON.stringify(names)) return;
+
+    if (!doc.hasIn(['agent', 'skills'])) doc.setIn(['agent', 'skills'], {});
+    doc.setIn(['agent', 'skills', 'disabled'], names);
+    await fs.writeFile(p, doc.toString(), 'utf8');
+    console.log(`[Agent] 💾 Saved skills.disabled (${names.length} 项) to config/agent.yaml`);
   }
 
   /**

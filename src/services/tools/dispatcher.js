@@ -2,6 +2,7 @@ import path from 'path';
 import { FileAccessPolicy } from '../pathguard.js';
 import { sanitizeToolName } from '../toolname.js';
 import { isValidCron, cronValidationError } from '../cron-utils.js';
+import { readMcpServers, writeMcpServers, redactServerConfig } from '../mcpconfig.js';
 
 /**
  * 工具分发与执行
@@ -344,6 +345,9 @@ export async function handleCommandTool(ctx, toolName, args = {}) {
    * 不 await 会在进程退出或下一回合重写时丢掉这次变更。
    * 异常统一降级为返回文本，避免向上冒泡丢掉本轮其余工具结果。
    */
+/** 宽松真值判断：模型可能给出 true / "true" / 1 */
+const asBool = (v) => v === true || v === 1 || String(v).trim().toLowerCase() === 'true';
+
 export async function handleManagementTool(ctx, toolName, args = {}) {
     try {
       switch (toolName) {
@@ -450,6 +454,143 @@ export async function handleManagementTool(ctx, toolName, args = {}) {
           return changes.length > 0
             ? `已更新心跳配置：${changes.join('；')}`
             : '未做任何修改（请提供 enabled / interval / dynamic_prompt / check / remove_check 之一）';
+        }
+
+        case 'mgmt_restart': {
+          const reason = String(args.reason ?? '').trim() || '用户请求重启';
+          if (typeof ctx.requestRestart !== 'function') {
+            return '当前运行环境不支持软重启（未注册重启回调），请手动重启进程';
+          }
+          // 与 MCP 配置改动同一条通道：本轮回复送达后才真正重启，
+          // 否则 restart() 会把这条回复连同 SSE/飞书连接一起掐断
+          ctx.requestRestart(reason);
+          const delay = ((ctx.restartDelayMs ?? 2500) / 1000).toFixed(1);
+          return `已安排软重启：${reason}。本轮回复送达后约 ${delay}s 执行，期间 WebUI / 飞书等长连接会短暂中断`;
+        }
+
+        case 'mgmt_mcp_list': {
+          // 与 WebUI /api/mcp 同一事实来源：直接读 config/mcporter.json。
+          // 不依赖 MCP runtime —— 连不上（HA 没起、Server 被禁用）时恰恰最需要它排查，
+          // 而 _mcpService 只在成功发现工具后才注入，靠它判断会直接看不到列表。
+          let servers;
+          try {
+            servers = (await readMcpServers()).servers;
+          } catch (e) {
+            return `读取 mcporter.json 失败：${e.message}`;
+          }
+
+          const names = Object.keys(servers);
+          if (names.length === 0) return 'config/mcporter.json 中没有配置任何 MCP Server';
+
+          const toolsByServer = {};
+          for (const mapping of Object.values(ctx._mcpToolMap || {})) {
+            if (!mapping?.server) continue;
+            (toolsByServer[mapping.server] ||= []).push(mapping.toolName);
+          }
+
+          return JSON.stringify({
+            configPath: 'config/mcporter.json',
+            servers: names.map((name) => ({
+              ...redactServerConfig(name, servers[name]),
+              // 已注册进模型的工具；为空说明未连接或 enabled:false
+              tools: (toolsByServer[name] || []).sort(),
+              registered: (toolsByServer[name] || []).length > 0,
+            })),
+          }, null, 2);
+        }
+
+        case 'mgmt_mcp_toggle':
+        case 'mgmt_mcp_remove': {
+          const name = String(args.name ?? '').trim();
+          if (!name) return '缺少 name（MCP Server 名称，见 mgmt_mcp_list）';
+
+          // 以文件为准读写：文件里是 ${VAR} 占位符原文，
+          // 若改用 _mcpService.config（已替换成真实值）回写会把 token 落到磁盘
+          let servers;
+          try {
+            servers = (await readMcpServers()).servers;
+          } catch (e) {
+            return `读取 mcporter.json 失败：${e.message}`;
+          }
+          if (!(name in servers)) return `未找到 MCP Server: ${name}`;
+
+          const isRemove = toolName === 'mgmt_mcp_remove';
+          const enabled = asBool(args.enabled);
+          const before = servers[name];
+          if (isRemove) delete servers[name];
+          else servers[name] = { ...before, enabled };
+
+          const verb = isRemove ? '已删除' : (enabled ? '已启用' : '已禁用');
+          try {
+            await writeMcpServers(servers);
+          } catch (e) {
+            // 改的是文件副本，写失败天然不影响任何内存状态
+            return `${verb}失败：mcporter.json 写入失败（${e.message}），未做任何修改`;
+          }
+
+          // 同步运行时内存（best-effort）：让当前会话的 list 立即反映新状态；
+          // 真正的连接/注销仍需重启进程
+          if (ctx._mcpService?.config?.mcpServers) {
+            if (isRemove) delete ctx._mcpService.config.mcpServers[name];
+            else if (ctx._mcpService.config.mcpServers[name]) {
+              ctx._mcpService.config.mcpServers[name].enabled = enabled;
+            }
+          }
+
+          // MCP 连接在启动时固化，改完必须重启。但不能在这里同步重启：
+          // restart() 会关掉 WebUI/SSE 与本轮回复的投递通道，
+          // 所以只打标记，由 CoreAgent 在本轮收尾后延时软重启。
+          if (typeof ctx.requestRestart === 'function') {
+            ctx.requestRestart(`MCP Server 变更（${name}）`);
+            return `${verb} MCP Server: ${name}（已写入 config/mcporter.json，本轮回复后自动重启生效）`;
+          }
+          return `${verb} MCP Server: ${name}（已写入 config/mcporter.json，请手动重启进程生效）`;
+        }
+
+        case 'mgmt_skill_list': {
+          if (!ctx._skillService) return '技能服务未初始化';
+          const all = await ctx._skillService.listAll();
+          const disabled = typeof ctx._skillService.getDisabled === 'function'
+            ? ctx._skillService.getDisabled()
+            : [];
+          return JSON.stringify({
+            skills: all.map((s) => ({
+              name: s.name,
+              type: s.type,
+              enabled: !disabled.includes(s.name),
+              description: s.description || '',
+            })),
+            disabled,
+          }, null, 2);
+        }
+
+        case 'mgmt_skill_toggle': {
+          if (!ctx._skillService) return '技能服务未初始化';
+          const name = String(args.name ?? '').trim();
+          if (!name) return '缺少 name（技能名称，见 mgmt_skill_list）';
+          const svc = ctx._skillService;
+          if (typeof svc.has === 'function' && !(await svc.has(name))) {
+            return `未找到技能: ${name}`;
+          }
+
+          const enabled = asBool(args.enabled);
+          const prev = typeof svc.getDisabled === 'function' ? svc.getDisabled() : [];
+          const disabled = new Set(prev);
+          if (enabled) disabled.delete(name);
+          else disabled.add(name);
+
+          // 落盘优先：写失败不改内存，避免"本会话已禁用、重启后又出现"
+          if (typeof ctx._onSkillsChanged === 'function') {
+            try {
+              await ctx._onSkillsChanged([...disabled]);
+            } catch (e) {
+              return `技能开关写入 agent.yaml 失败（${e.message}），未做任何修改`;
+            }
+          }
+          if (typeof svc.setDisabled === 'function') svc.setDisabled([...disabled]);
+
+          const persisted = typeof ctx._onSkillsChanged === 'function';
+          return `已${enabled ? '启用' : '禁用'}技能: ${name}（立即生效${persisted ? '，已写入 config/agent.yaml' : '；未配置落盘回调，重启后丢失'}）`;
         }
 
         default:

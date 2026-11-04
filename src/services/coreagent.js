@@ -111,6 +111,9 @@ class CoreAgent {
     this.systemPrompt = modelConfig.systemPrompt || DEFAULT_SYSTEM_PROMPT;
     this.maxContextTurns = modelConfig.maxContextTurns || 20;
     this.maxToolIterations = modelConfig.maxToolIterations || 10;
+    // 工具请求重启后，等本轮回复送达再重启：软重启会关掉 WebUI/SSE 与飞书长连接，
+    // 同步重启会让用户只看到"连接被中断"
+    this.restartDelayMs = modelConfig.restartDelayMs ?? 2500;
     this.sessionDir = modelConfig.sessionDir || './sessions';
     this.primaryConfigs = modelConfig.primaryConfigs || [];
     if (this.primaryConfigs.length === 0 && modelConfig.model) {
@@ -214,6 +217,59 @@ class CoreAgent {
    */
   setOnCronTasksChanged(handler) {
     this._onCronTasksChanged = handler;
+  }
+
+  /**
+   * 设置技能禁用名单变更回调（mgmt_skill_toggle 落盘用）
+   * @param {Function} handler - 接收 disabled 名称数组，返回 { message }
+   */
+  setOnSkillsChanged(handler) {
+    this._onSkillsChanged = handler;
+  }
+
+  /**
+   * 设置软重启回调（工具改了"启动时才固化"的配置后使用，如 MCP Server）
+   * @param {Function} handler - 异步函数，由 Agent 执行 restart()
+   */
+  setOnRestartRequested(handler) {
+    this._onRestartRequested = handler;
+  }
+
+  /**
+   * 请求在本轮对话结束后软重启
+   *
+   * 为什么不在工具里直接重启：restart() 会 stop() 掉 WebUI/SSE、飞书 WS 与 MCP 子进程，
+   * 当前这一轮的回复还没送出，同步重启等于把用户的回答连同连接一起掐断。
+   * 这里只打标记，等 decide() 收尾（历史已落盘、回复已生成）再延时触发。
+   *
+   * @param {string} reason - 变更说明，用于日志
+   */
+  requestRestart(reason = '配置变更') {
+    this._pendingRestart = reason;
+  }
+
+  /**
+   * 若本轮请求过重启，则在延迟后交给 Agent 执行
+   * @private
+   */
+  _schedulePendingRestart() {
+    const reason = this._pendingRestart;
+    if (!reason) return;
+    this._pendingRestart = null;
+
+    if (typeof this._onRestartRequested !== 'function') {
+      console.warn(`[CoreAgent] 需要重启以应用「${reason}」，但未注册重启回调，请手动重启`);
+      return;
+    }
+
+    console.log(`[CoreAgent] ${this.restartDelayMs}ms 后软重启以应用：${reason}`);
+    const timer = setTimeout(() => {
+      Promise.resolve()
+        .then(() => this._onRestartRequested(reason))
+        .catch((e) => console.error(`[CoreAgent] 软重启失败: ${e.message}`));
+    }, this.restartDelayMs);
+    // 不阻止进程退出（例如 CLI 单次调用场景）
+    if (typeof timer.unref === 'function') timer.unref();
   }
 
   /**
@@ -846,6 +902,9 @@ class CoreAgent {
     // 执行成功，更新内存会话状态并保存
     this._sessions[sessionId] = workingHistory;
     await this._saveSession(sessionId, workingHistory);
+
+    // 工具改过"启动时固化"的配置（如 MCP Server）→ 本轮收尾后自动软重启
+    this._schedulePendingRestart();
 
     return this.parseOutput(finalResponse);
   }

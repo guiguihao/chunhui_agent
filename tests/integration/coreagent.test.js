@@ -259,6 +259,46 @@ describe('CoreAgent 自动压缩触发频率', () => {
   });
 });
 
+describe('CoreAgent 工具触发的软重启', () => {
+  test('requestRestart 不立即执行，在本轮收尾后延时回调', async () => {
+    const { setScript, text } = globalThis.__coreTest;
+    const seen = [];
+
+    const agent = new CoreAgent({
+      name: 'test', sessionDir: DIR, systemPrompt: 'hi {name}',
+      primaryConfigs: [{ model: 'm', baseUrl, apiKey: 'k' }],
+      restartDelayMs: 5,
+    });
+    agent.setOnRestartRequested(async (reason) => { seen.push(reason); });
+
+    // 模拟工具调用期间打标记
+    agent.requestRestart('MCP Server 变更（ha-mcp）');
+    setScript(text('配置已更新'));
+    const r = await agent.decide('改配置', { sessionId: 'restart_req' });
+
+    assert.equal(r.response, '配置已更新');
+    assert.equal(seen.length, 0, '本轮回复生成前绝不能重启，否则回复与连接一起断');
+
+    await new Promise((done) => setTimeout(done, 40));
+    assert.deepEqual(seen, ['MCP Server 变更（ha-mcp）']);
+  });
+
+  test('未注册重启回调时只告警，不影响本轮结果', async () => {
+    const { setScript, text } = globalThis.__coreTest;
+    const agent = new CoreAgent({
+      name: 'test', sessionDir: DIR, systemPrompt: 'hi {name}',
+      primaryConfigs: [{ model: 'm', baseUrl, apiKey: 'k' }],
+      restartDelayMs: 5,
+    });
+    agent.requestRestart('无回调场景');
+    setScript(text('照常回复'));
+
+    const r = await agent.decide('继续', { sessionId: 'restart_nohandler' });
+    assert.equal(r.response, '照常回复');
+    assert.equal(agent._pendingRestart, null, '标记必须被消费，否则后续每轮都会触发');
+  });
+});
+
 describe('CoreAgent 会话隔离', () => {
   test('不同 sessionId 写入独立文件且不互相污染', async () => {
     const { setScript, text } = globalThis.__coreTest;

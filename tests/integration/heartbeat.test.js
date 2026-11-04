@@ -292,6 +292,14 @@ describe('Heartbeat 结构化更新（mgmt_heartbeat_update）', () => {
     assert.equal(persisted, 1, '配置变更必须落盘');
   });
 
+  test('全局 interval 传空串时忽略并在变更说明里回话', async () => {
+    const hb = mkHeartbeat({}, base());
+    const changes = await hb.applyToolPatch({ interval: '   ' });
+
+    assert.match(changes.join(' '), /已忽略本次提交/);
+    assert.equal(hb.interval, '* * * * *', '空串不是"继承全局"，原值必须保留');
+  });
+
   test('没有任何可识别字段时返回空变更，不乱动配置', async () => {
     const hb = mkHeartbeat({}, base());
     assert.deepEqual(await hb.applyToolPatch({}), []);

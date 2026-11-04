@@ -240,6 +240,94 @@ export async function getAllTools(ctx, filter = null) {
       );
     }
 
+    // 软重启：仅在用户明确要求、或某项配置必须重建连接时使用
+    tools.push({
+      type: 'function',
+      function: {
+        name: 'mgmt_restart',
+        description: '软重启 Agent（重建 WebUI/MCP/飞书等长连接）。本轮回复送达后才执行，执行期间长连接会短暂中断；仅在用户明确要求或配置必须重建时使用',
+        parameters: {
+          type: 'object',
+          properties: {
+            reason: { type: 'string', description: '重启原因，写入日志便于追溯' },
+          },
+          required: [],
+        },
+      },
+    });
+
+    // MCP Server 管理工具（读写 config/mcporter.json；运行时需重启进程生效）
+    // 刻意不做服务门控：MCP 连不上/被禁用时最需要这些工具来排查，
+    // 而 _mcpService 只在成功发现工具后才注入，门控会让工具直接消失
+    tools.push(
+        {
+          type: 'function',
+          function: {
+            name: 'mgmt_mcp_list',
+            description: '列出所有 MCP Server（名称、启用状态、连接地址/命令、已发现的工具列表）',
+            parameters: { type: 'object', properties: {}, required: [] },
+          },
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'mgmt_mcp_toggle',
+            description: '启用或禁用一个 MCP Server（写入 mcporter.json，需重启进程生效）',
+            parameters: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', description: 'MCP Server 名称（见 mgmt_mcp_list）' },
+                enabled: { type: 'boolean', description: 'true=启用，false=禁用' },
+              },
+              required: ['name', 'enabled'],
+            },
+          },
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'mgmt_mcp_remove',
+            description: '从配置中删除一个 MCP Server（破坏性操作，需重启进程生效；删除前应与用户确认）',
+            parameters: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', description: 'MCP Server 名称（见 mgmt_mcp_list）' },
+              },
+              required: ['name'],
+              },
+              },
+              }
+              );
+
+              // 技能管理工具
+    if (ctx._skillService) {
+      tools.push(
+        {
+          type: 'function',
+          function: {
+            name: 'mgmt_skill_list',
+            description: '列出全部技能（名称、类型、启用状态、描述），含被禁用的技能',
+            parameters: { type: 'object', properties: {}, required: [] },
+          },
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'mgmt_skill_toggle',
+            description: '启用或禁用一个技能。禁用只是不再注册其工具、不允许调用，不会删除技能文件',
+            parameters: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', description: '技能名称（见 mgmt_skill_list）' },
+                enabled: { type: 'boolean', description: 'true=启用，false=禁用' },
+              },
+              required: ['name', 'enabled'],
+            },
+          },
+        }
+      );
+    }
+
     // 文件操作工具（沙箱化：限制在工作目录）
     tools.push(
       {

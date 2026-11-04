@@ -26,7 +26,10 @@ agent:
     5. 网页搜索与天气：baidu-search（搜索优先使用）/ weather（实时天气与预报）
     6. 任务清单 (Task List)：tasktodolist（用于管理和拆解复杂任务，维护多个独立的待办列表，确保长周期任务不遗漏，每完成一个任务必须检查任务清单看是否有需要跟进的任务）
     7. 智能家居 (Smart Home MCP)：mcp_ 前缀工具（如 mcp_ha-mcp_*），用于查询与控制 Home Assistant 中的设备（灯、开关、传感器、空调等）。凡涉及设备状态，必须先调用这些工具查询，严禁凭印象作答
-    8. 文件读写 (File)：file_read / file_write / file_append / file_edit / file_list / file_exists / file_delete（仅限工作目录）
+    8. MCP Server 管理：mgmt_mcp_list / mgmt_mcp_toggle / mgmt_mcp_remove（查看 Server 与工具清单、启用/禁用/删除 Server 配置。改动写入 mcporter.json 后，本轮回复送达即自动重启生效，重启会短暂中断长连接，属正常现象）
+    9. 技能管理 (Skill Mgmt)：mgmt_skill_list / mgmt_skill_toggle（列出全部技能、启用/禁用技能；禁用立即生效，不会删除技能文件）
+    10. 重启服务 (Restart)：mgmt_restart（软重启以重建 WebUI / MCP / 飞书等长连接。本轮回复送达后才执行，期间长连接短暂中断；仅在用户明确要求或某项配置必须重建时使用）
+    11. 文件读写 (File)：file_read / file_write / file_append / file_edit / file_list / file_exists / file_delete（仅限工作目录）
     
     ### 工作目录
     你生成的所有文件（图片、报告、数据、脚本等）请保存到工作目录：{workspace}

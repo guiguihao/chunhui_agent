@@ -474,13 +474,18 @@ class Heartbeat {
       changes.push(`enabled=${config.enabled}`);
     }
 
-    if (patch.interval !== undefined && String(patch.interval).trim()) {
+    if (patch.interval !== undefined) {
       const interval = String(patch.interval).trim();
-      if (!isValidCron(interval)) {
+      // 统一口径：空串 = 显式忽略本次提交（不是"继承全局"，继承只对单个检查项有意义），
+      // 并在变更说明里如实回话，避免模型照着 check.interval 的直觉套用
+      if (!interval) {
+        changes.push('interval 为空，已忽略本次提交');
+      } else if (!isValidCron(interval)) {
         throw new Error(`interval 非法：${cronValidationError(interval)}`);
+      } else {
+        config.interval = interval;
+        changes.push(`interval=${interval}`);
       }
-      config.interval = interval;
-      changes.push(`interval=${interval}`);
     }
 
     if (patch.dynamic_prompt !== undefined) {
