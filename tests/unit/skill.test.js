@@ -136,4 +136,26 @@ describe('SkillService 禁用名单', () => {
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
+
+  test('受保护技能：配置与运行时都禁不掉', async () => {
+    const dir = await mkDir();
+    try {
+      // 配置文件里残留受保护技能时必须被丢弃，避免"改配置绕过保护"
+      const svc = new SkillService({
+        directory: dir,
+        disabled: ['tasktodolist', 'weather', 'demo'],
+      });
+      await svc.init();
+
+      assert.deepEqual(svc.getDisabled(), ['demo']);
+      assert.equal(svc.isProtected('weather'), true);
+      assert.equal(svc.isProtected('tasktodolist'), true);
+      assert.equal(svc.isProtected('demo'), false);
+
+      svc.setDisabled(['weather', 'helper']);
+      assert.deepEqual(svc.getDisabled(), ['helper'], 'setDisabled 也必须过滤受保护技能');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
 });

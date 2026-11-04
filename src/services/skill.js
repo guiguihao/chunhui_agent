@@ -3,6 +3,15 @@ import path from 'path';
 import yaml from 'yaml';
 
 /**
+ * 不允许被禁用的技能
+ *
+ * 这两项是 Agent 的基础能力：任务清单用于长周期任务不遗漏，
+ * 天气是"出门/穿衣/关窗"类判断的常识来源。禁用后 Agent 会静默失去对应能力，
+ * 且用户很难意识到是自己关掉的，因此在这里硬性兜底。
+ */
+export const PROTECTED_SKILLS = ['tasktodolist', 'weather'];
+
+/**
  * SkillService - 技能管理服务
  * 支持 .js 逻辑技能 和 标准 .md 知识技能
  */
@@ -12,20 +21,39 @@ class SkillService {
     // 运行时禁用名单（持久化在 agent.yaml 的 agent.skills.disabled）。
     // 禁用只是"不注册工具 + 不允许派发"，技能文件本身不动——
     // 删除目录属于破坏性操作，不交给模型做。
-    this.disabled = new Set((config.disabled || []).map((n) => String(n)));
+    this.protected = new Set(PROTECTED_SKILLS.map((n) => String(n)));
+    // 配置文件里若残留受保护技能，构造时就丢掉，避免"改配置绕过保护"
+    this.disabled = new Set(
+      (config.disabled || [])
+        .map((n) => String(n))
+        .filter((n) => !this.protected.has(n)),
+    );
   }
 
   /**
-   * 覆盖禁用名单
+   * 覆盖禁用名单（受保护技能会被过滤掉）
    * @param {string[]} names - 技能名数组，空数组表示全部解禁
    */
   setDisabled(names = []) {
-    this.disabled = new Set((names || []).map((n) => String(n)));
+    this.disabled = new Set(
+      (names || [])
+        .map((n) => String(n))
+        .filter((n) => !this.protected.has(n)),
+    );
   }
 
   /** 当前禁用名单 */
   getDisabled() {
     return [...this.disabled];
+  }
+
+  /**
+   * 是否为不可禁用的基础技能
+   * @param {string} name
+   * @returns {boolean}
+   */
+  isProtected(name) {
+    return this.protected.has(String(name));
   }
 
   async init() {

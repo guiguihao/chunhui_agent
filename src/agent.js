@@ -1,7 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import yaml from 'yaml';
+import yaml, { isCollection } from 'yaml';
 import dotenv from 'dotenv';
 import CoreAgent, { toSessionId } from './services/coreagent.js';
 import Scheduler, { mergeConfiguredTasks } from './services/scheduler.js';
@@ -18,6 +18,26 @@ import WeixinService from '../plugin/weixin.js';
 
 // 加载环境变量
 dotenv.config();
+
+/**
+ * 保证 YAML 文档有可写的根 map
+ *
+ * 两个坑都踩过：
+ *   1. 空文件 / 纯注释文件的 `document.contents` 是 null，直接 setIn 会抛
+ *      "Expected a YAML collection as document contents"；
+ *   2. 用普通 JS 对象（`doc.setIn(['a','b'], {})`）占位会生成 constructor 为 Object
+ *      的非集合节点，后续 setIn 子路径抛 "Expected YAML collection at b"。
+ * 正确做法是用 doc.createNode({}) 建真正的 YAMLMap。
+ *
+ * @param {import('yaml').Document} doc
+ * @returns {import('yaml').Document}
+ */
+function ensureYamlRoot(doc) {
+  if (!doc.contents || !isCollection(doc.contents)) {
+    doc.contents = doc.createNode({});
+  }
+  return doc;
+}
 
 /**
  * ureal Agent 主入口
@@ -97,6 +117,9 @@ class SmartHomeAgent {
     this.agent.setOnSkillsChanged(async (names) => {
       await this.saveSkillsDisabled(names);
     });
+
+    // AI 通过 env_set / env_delete 改 .env 后立刻热加载，避免「文件已改、进程仍用旧值」
+    this.agent.setOnEnvChanged(async () => this.reloadEnv());
 
     // 4. 初始化调度器
     this.scheduler = new Scheduler({
@@ -608,8 +631,13 @@ class SmartHomeAgent {
       const hbPath = path.join(process.cwd(), 'config', 'heartbeat.yaml');
       const raw = await fs.readFile(hbPath, 'utf8');
 
-      const doc = yaml.parseDocument(raw);
-      if (!doc.has('heartbeat')) doc.set('heartbeat', {});
+      const doc = ensureYamlRoot(yaml.parseDocument(raw));
+      // 不能先用 {} 占位：setIn 传入普通 JS 对象会生成非集合节点，
+      // 后续 setIn(['heartbeat', ...]) 会抛 "Expected YAML collection"。
+      // 缺键时直接 setIn 子路径，yaml 会按需创建中间 map。
+      if (!doc.has('heartbeat') || !isCollection(doc.get('heartbeat', true))) {
+        doc.delete('heartbeat');
+      }
 
       const desired = {
         enabled: this.heartbeat.enabled !== false,
@@ -649,11 +677,20 @@ class SmartHomeAgent {
   async saveSkillsDisabled(names) {
     const p = path.join(process.cwd(), 'config', 'agent.yaml');
     const raw = await fs.readFile(p, 'utf8');
-    const doc = yaml.parseDocument(raw);
+    const doc = ensureYamlRoot(yaml.parseDocument(raw));
+
+    // 不能先用 {} 占位：setIn 传入普通 JS 对象会生成非集合节点（constructor 为 Object），
+    // 后续 setIn(['agent','skills','disabled']) 会抛
+    // "Expected YAML collection at skills"。缺键时直接写子路径即可，yaml 会按需建 map。
+    const skillsNode = doc.getIn(['agent', 'skills'], true);
+    if (skillsNode !== undefined && !isCollection(skillsNode)) {
+      // 显式写了 `skills:`（null）或误写成标量时，先删掉再重建
+      doc.deleteIn(['agent', 'skills']);
+    }
+
     const current = doc.getIn(['agent', 'skills', 'disabled']);
     if (JSON.stringify(current === undefined ? [] : current) === JSON.stringify(names)) return;
 
-    if (!doc.hasIn(['agent', 'skills'])) doc.setIn(['agent', 'skills'], {});
     doc.setIn(['agent', 'skills', 'disabled'], names);
     await fs.writeFile(p, doc.toString(), 'utf8');
     console.log(`[Agent] 💾 Saved skills.disabled (${names.length} 项) to config/agent.yaml`);

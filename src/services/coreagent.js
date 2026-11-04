@@ -165,6 +165,7 @@ class CoreAgent {
     this._mcpService = null;     // MCPorterService 实例
     this._readmeCache = null;    // README.md 内容缓存
     this._onCronTasksChanged = null; // Cron 任务变更回调
+    this._onEnvChanged = null;     // .env 变更后的热加载回调（env_* 工具用）
     this._fileReadRoots = modelConfig.fileReadRoots || []; // 额外只读根目录（agent.yaml: agent.file_read_roots）
     this._filePolicy = null;     // 延迟构建的文件访问策略
     this.includeFullReadme = modelConfig.includeFullReadme === true; // 是否注入完整 README
@@ -225,6 +226,18 @@ class CoreAgent {
    */
   setOnSkillsChanged(handler) {
     this._onSkillsChanged = handler;
+  }
+
+  /**
+   * 设置 .env 变更后的热加载回调（env_set / env_delete 落盘后调用）
+   *
+   * 传 SmartHomeAgent.reloadEnv：它按「以文件为准」的语义同步 process.env，
+   * 并刷新模型配置里的 apiKey，否则会出现「文件改了但本进程仍用旧 key」。
+   *
+   * @param {Function} handler - 无参异步函数，返回 { updated, removed }
+   */
+  setOnEnvChanged(handler) {
+    this._onEnvChanged = handler;
   }
 
   /**

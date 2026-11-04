@@ -10,6 +10,7 @@ const translations = {
     nav_cron: 'Cron Tasks',
     nav_heartbeat: 'Heartbeat',
     nav_mcp: 'MCP Servers',
+    nav_skills: 'Skills',
     nav_channels: 'Channels',
     logo_admin: 'ureal',
 
@@ -162,6 +163,25 @@ const translations = {
     qr_state_ok_hint_2: 'miot-mcp will save login information automatically after scanning',
     qr_gen_time: '⏱ Generated at: ',
 
+    // SkillsView
+    skills_title: 'Skills',
+    skills_subtitle: 'Agent capabilities — {active} enabled / {total} total',
+    skills_loading: 'Loading skills...',
+    skills_empty: 'No skills found in the skills/ directory.',
+    skills_hint: 'Disabling a skill only unregisters its tool and blocks invocation — files are never deleted. Changes take effect in the next turn, no restart needed.',
+    skills_load_err: 'Failed to load skills: ',
+    skills_enabled: 'Enabled',
+    skills_disabled: 'Disabled',
+    skills_action_enable: 'Enable this skill',
+    skills_action_disable: 'Disable this skill',
+    skills_action_protected: 'Core capability — cannot be disabled',
+    skills_protected_tip: '{name} is a core capability and cannot be disabled',
+    skills_protected: 'Core',
+    skills_enabled_ok: '✓ Enabled {name}',
+    skills_disabled_ok: '✓ Disabled {name}',
+    skills_type_md: 'Prompt',
+    skills_type_js: 'Code',
+
     // ChannelsView
     ch_title: 'Channels',
     ch_subtitle: 'Message channels — {count} connected',
@@ -255,6 +275,7 @@ const translations = {
     nav_cron: '定时任务',
     nav_heartbeat: '心跳检测',
     nav_mcp: 'MCP 服务',
+    nav_skills: '技能管理',
     nav_channels: '渠道管理',
     logo_admin: '舒适精灵',
 
@@ -406,6 +427,25 @@ const translations = {
     qr_state_ok_hint: '请使用小米账号 App 扫码登录',
     qr_state_ok_hint_2: '扫码后 miot-mcp 将自动保存登录信息',
     qr_gen_time: '⏱ 图片生成时间: ',
+
+    // SkillsView
+    skills_title: '技能管理',
+    skills_subtitle: 'Agent 可用技能 — 已启用 {active} 个 / 共 {total} 个',
+    skills_loading: '正在加载技能…',
+    skills_empty: 'skills/ 目录下没有发现任何技能。',
+    skills_hint: '禁用只是不再注册该技能的工具、并禁止调用，不会删除 skills/ 下的文件。改动下一轮对话立即生效，无需重启。',
+    skills_load_err: '加载技能失败: ',
+    skills_enabled: '已启用',
+    skills_disabled: '已禁用',
+    skills_action_enable: '启用该技能',
+    skills_action_disable: '禁用该技能',
+    skills_action_protected: '基础能力，不可禁用',
+    skills_protected_tip: '{name} 是基础能力，不可禁用',
+    skills_protected: '基础能力',
+    skills_enabled_ok: '✓ 已启用 {name}',
+    skills_disabled_ok: '✓ 已禁用 {name}',
+    skills_type_md: '提示词',
+    skills_type_js: '代码',
 
     // ChannelsView
     ch_title: '渠道管理',

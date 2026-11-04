@@ -3,6 +3,14 @@ import { FileAccessPolicy } from '../pathguard.js';
 import { sanitizeToolName } from '../toolname.js';
 import { isValidCron, cronValidationError } from '../cron-utils.js';
 import { readMcpServers, writeMcpServers, redactServerConfig } from '../mcpconfig.js';
+import {
+  isValidEnvKey,
+  listEnvEntries,
+  getEnvValue,
+  patchEnvVars,
+  deleteEnvVars,
+  maskEnvValue,
+} from '../envfile.js';
 
 /**
  * 工具分发与执行
@@ -35,6 +43,8 @@ export async function handleToolCall(ctx, toolName, args = {}) {
       return await handleFileTool(ctx, cleanToolName, args);
     } else if (cleanToolName.startsWith('cmd_')) {
       return await handleCommandTool(ctx, cleanToolName, args);
+    } else if (cleanToolName.startsWith('env_')) {
+      return await handleEnvTool(ctx, cleanToolName, args);
     }
 
     // 兜底：尝试作为动态映射的技能处理
@@ -189,6 +199,92 @@ export async function handleFileTool(ctx, toolName, args = {}) {
       }
     } catch (e) {
       return `文件操作错误: ${e.message}`;
+    }
+  }
+
+  /**
+   * 处理 .env 环境变量工具
+   *
+   * 为什么单独走 env_* 前缀而不复用 file_*：.env 在 pathguard 里是黑名单文件，
+   * 文件工具必须继续拒绝它（防止模型随手覆盖源码/凭证）。这里提供的是受限入口：
+   *   - 只能操作项目根目录的 .env，不接受路径参数；
+   *   - 值不允许包含换行，避免一次写入注入多行；
+   *   - 写完调用 ctx._onEnvChanged 触发 reloadEnv，让 process.env 与文件保持一致。
+   */
+export async function handleEnvTool(ctx, toolName, args = {}) {
+    const { promises: fs } = await import('fs');
+    const envPath = ctx._envPath || path.join(process.cwd(), '.env');
+
+    /** 写后热加载：文件是事实来源，reloadEnv 会把增删同步到 process.env */
+    const reloadNote = async () => {
+      if (typeof ctx._onEnvChanged !== 'function') {
+        return '；未配置热加载回调，需重启进程才生效';
+      }
+      try {
+        const r = await ctx._onEnvChanged();
+        const changed = Array.isArray(r?.updated) ? r.updated.length : 0;
+        const removed = Array.isArray(r?.removed) ? r.removed.length : 0;
+        const detail = changed || removed ? `（更新 ${changed} 项，移除 ${removed} 项）` : '';
+        return `；已同步到进程内存${detail}。飞书/微信等长连接持有的是启动时的凭证，需重启才生效`;
+      } catch (e) {
+        return `；文件已写入，但热加载失败（${e.message}），需重启进程`;
+      }
+    };
+
+    try {
+      const raw = await fs.readFile(envPath, 'utf8').catch((e) => {
+        if (e.code === 'ENOENT') return '';
+        throw e;
+      });
+
+      switch (toolName) {
+        case 'env_list': {
+          const entries = listEnvEntries(raw);
+          if (!entries.length) return '.env 中没有任何变量';
+          return entries.map(({ key, value }) => `${key}=${maskEnvValue(value)}`).join('\n');
+        }
+
+        case 'env_get': {
+          const key = String(args.key ?? '').trim();
+          if (!key) return '缺少 key（变量名，如 OPENAI_API_KEY）';
+          if (!isValidEnvKey(key)) return `非法的变量名: ${key}`;
+          const value = getEnvValue(raw, key);
+          if (value === null) return `未找到变量: ${key}（用 env_list 查看现有变量）`;
+          // 密钥类的值只用于核对配置，不得原样回显给用户或写入外部文件
+          return `${key}=${value}\n\n（若为密钥类变量，请勿把完整值回显给用户或发送到外部）`;
+        }
+
+        case 'env_set': {
+          const key = String(args.key ?? '').trim();
+          const value = args.value === undefined || args.value === null ? '' : String(args.value);
+          if (!key) return '缺少 key（变量名，如 OPENAI_API_KEY）';
+          if (!isValidEnvKey(key)) {
+            return `非法的变量名: ${key}（只允许字母、数字、下划线，且不能以数字开头）`;
+          }
+          if (/[\r\n]/.test(value)) return '值不能包含换行（.env 一行一个变量）';
+
+          const existed = getEnvValue(raw, key) !== null;
+          const next = patchEnvVars(raw, { [key]: value });
+          await fs.writeFile(envPath, next, 'utf8');
+          return `已${existed ? '更新' : '新增'}环境变量: ${key}${await reloadNote()}`;
+        }
+
+        case 'env_delete': {
+          const key = String(args.key ?? '').trim();
+          if (!key) return '缺少 key（变量名，如 OPENAI_API_KEY）';
+          if (!isValidEnvKey(key)) return `非法的变量名: ${key}`;
+
+          const { text: next, removed } = deleteEnvVars(raw, [key]);
+          if (!removed.length) return `未找到变量: ${key}（用 env_list 查看现有变量）`;
+          await fs.writeFile(envPath, next, 'utf8');
+          return `已删除环境变量: ${key}${await reloadNote()}`;
+        }
+
+        default:
+          return `未知环境变量工具: ${toolName}`;
+      }
+    } catch (e) {
+      return `环境变量操作失败: ${e.message}`;
     }
   }
 
@@ -574,6 +670,12 @@ export async function handleManagementTool(ctx, toolName, args = {}) {
           }
 
           const enabled = asBool(args.enabled);
+          // 受保护技能是 Agent 的基础能力，禁用后用户很难察觉是自己关掉的，
+          // 因此在入口直接拒绝，避免落盘一个会被 SkillService 过滤掉的名字
+          if (!enabled && typeof svc.isProtected === 'function' && svc.isProtected(name)) {
+            return `技能 ${name} 是基础能力，不允许禁用`;
+          }
+
           const prev = typeof svc.getDisabled === 'function' ? svc.getDisabled() : [];
           const disabled = new Set(prev);
           if (enabled) disabled.delete(name);

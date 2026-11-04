@@ -8,6 +8,8 @@ import { log } from 'console';
 import { isInside } from '../src/services/pathguard.js';
 import { isValidCron, cronValidationError } from '../src/services/cron-utils.js';
 import { formatDateInTz, normalizeDayRule } from '../src/services/holiday.js';
+// .env 的引号/转义规则必须与 env_* 工具完全一致，否则「界面保存的值」与「工具读到的值」会分叉
+import { formatEnvValue, parseEnvValue, patchEnvVars } from '../src/services/envfile.js';
 
 /** 把工具参数（可能是 JSON 字符串）格式化成便于阅读的文本 */
 function formatToolArgs(raw) {
@@ -82,85 +84,11 @@ export function buildDisplayHistory(history = []) {
   return items.map((item, index) => ({ id: now + index, ...item }));
 }
 
-/**
- * 将 .env 变量的值格式化为安全字面量
- *
- * 读取侧（GET /api/env）会剥掉值的引号，因此保存时必须按需补回：
- * 若值包含空格、#、引号或反斜杠却不加引号，dotenv 会把 `#` 之后当成注释，
- * 造成值被静默截断（例如 `NOTE=abc #123` 最终只剩 `abc`）。
- *
- * @param {string} value - 原始值
- * @returns {string} 可直接写入 .env 的字面量
- */
-function formatEnvValue(value) {
-  const v = value ?? '';
-  if (v === '') return '';
-  if (!/[\s#'"`]/.test(v)) return v;
-
-  // dotenv 只剥离最外层引号，并不处理反斜杠转义，
-  // 因此绝不能自行加反斜杠（否则 C:\path 会变成 C:\\path）。
-  // 正确做法是挑一个值里不存在的引号来包裹。
-  if (!v.includes('"')) return `"${v}"`;
-  if (!v.includes("'")) return `'${v}'`;
-
-  // 同时含单双引号：.env 格式无法无歧义表达，只能尽力而为并告警
-  console.warn('[WebUI] .env 值同时包含单双引号，可能无法原样还原:', v);
-  return `"${v}"`;
-}
-
-/**
- * 解析 .env 中 `KEY=` 后面的原始字面量，还原为真实值
- *
- * 必须与 formatEnvValue 严格对称：只剥引号而不反转义，
- * 会让含转义引号/反斜杠的值在界面上显示成一堆多余反斜杠，
- * 保存后进一步叠加转义。
- *
- * @param {string} raw - `=` 之后的部分
- * @returns {string} 还原后的值
- */
-function parseEnvValue(raw) {
-  const v = (raw ?? '').trim();
-  if (v.length >= 2) {
-    const quoted = (v.startsWith('"') && v.endsWith('"'))
-      || (v.startsWith("'") && v.endsWith("'"));
-    if (quoted) return v.slice(1, -1);
-  }
-  return v;
-}
-
-/**
- * 按 key 就地更新 .env 中的若干变量，其余行（含注释、空行、顺序）原样保留
- *
- * 不能走 POST /api/env 那套「整份 lines 重写」：渠道配置弹窗只关心两个 key，
- * 用整份重写一旦前端快照过期就会把别的变量抹掉。
- *
- * @param {string} text - .env 原始内容
- * @param {Record<string, string>} updates - key → 新值（undefined 表示不改）
- * @returns {string} 更新后的内容
- */
-function patchEnvVars(text, updates = {}) {
-  const pending = new Map(
-    Object.entries(updates).filter(([, v]) => v !== undefined && v !== null),
-  );
-
-  const lines = String(text ?? '').split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^([ \t]*)([A-Za-z_][A-Za-z0-9_]*)[ \t]*=/);
-    if (!m) continue;
-    const key = m[2];
-    if (!pending.has(key)) continue;
-    lines[i] = `${m[1]}${key}=${formatEnvValue(pending.get(key))}`;
-    pending.delete(key);
-  }
-
-  let content = lines.join('\n');
-  // 文件里没有的变量追加到末尾（首次配置 FEISHU_* 就是这条路径）
-  if (pending.size > 0) {
-    if (content && !content.endsWith('\n')) content += '\n';
-    for (const [key, value] of pending) content += `${key}=${formatEnvValue(value)}\n`;
-  }
-  return content;
-}
+// formatEnvValue / parseEnvValue / patchEnvVars 统一由 src/services/envfile.js 提供：
+// 渠道配置弹窗（POST /api/env）与 AI 的 env_* 工具写的是同一个文件，
+// 两套实现一旦漂移就会出现「界面保存后工具读到旧值」。
+// patchEnvVars 尤其不能走「整份 lines 重写」：弹窗只关心两个 key，
+// 前端快照过期时整份重写会把别的变量抹掉。
 
 /**
  * 从 .env 正文中取出指定变量的值（不读 process.env，文件才是事实来源）
@@ -838,6 +766,64 @@ class WebUIService {
           ? await this.agentInstance.reloadSubsystem('mcp')
           : { reloadable: false, requiresRestart: ['mcporter'] };
         res.json({ success: true, ...reload });
+      } catch (err) { res.status(500).json({ error: err.message }); }
+    });
+
+    // ──────────────────────────────────────────
+    // Skills（技能管理）
+    // ──────────────────────────────────────────
+    this.app.get('/api/skills', async (req, res) => {
+      try {
+        const svc = this.agentInstance?.skill;
+        if (!svc || typeof svc.listAll !== 'function') {
+          return res.status(503).json({ error: '技能服务未初始化' });
+        }
+        const all = await svc.listAll();
+        const disabled = typeof svc.getDisabled === 'function' ? svc.getDisabled() : [];
+        const isProtected = (n) => typeof svc.isProtected === 'function' && svc.isProtected(n);
+        res.json({
+          skills: all.map((s) => ({
+            name: s.name,
+            type: s.type,
+            description: s.description || '',
+            enabled: !disabled.includes(s.name),
+            // 前端据此把开关置灰：受保护技能不允许禁用
+            protected: isProtected(s.name),
+          })),
+          disabled,
+        });
+      } catch (err) { res.status(500).json({ error: err.message }); }
+    });
+
+    this.app.post('/api/skills', async (req, res) => {
+      try {
+        const svc = this.agentInstance?.skill;
+        if (!svc || typeof svc.setDisabled !== 'function') {
+          return res.status(503).json({ error: '技能服务未初始化' });
+        }
+        const name = String(req.body?.name || '').trim();
+        const enabled = req.body?.enabled === true;
+        if (!name) return res.status(400).json({ error: '缺少技能名称' });
+        if (typeof svc.has === 'function' && !(await svc.has(name))) {
+          return res.status(404).json({ error: `未找到技能: ${name}` });
+        }
+        // 受保护技能（基础能力）不允许禁用，避免 Agent 静默失去能力
+        if (!enabled && typeof svc.isProtected === 'function' && svc.isProtected(name)) {
+          return res.status(400).json({ error: `技能 ${name} 是基础能力，不允许禁用` });
+        }
+
+        const disabled = new Set(typeof svc.getDisabled === 'function' ? svc.getDisabled() : []);
+        if (enabled) disabled.delete(name);
+        else disabled.add(name);
+
+        // 先落盘再改内存：写失败不能留下"界面显示已禁用、重启后又回来"的状态
+        if (typeof this.agentInstance.saveSkillsDisabled === 'function') {
+          await this.agentInstance.saveSkillsDisabled([...disabled]);
+        }
+        svc.setDisabled([...disabled]);
+
+        // 技能开关只影响工具注册与派发，下一轮 decide 立即生效，无需重启
+        res.json({ success: true, name, enabled, disabled: [...disabled] });
       } catch (err) { res.status(500).json({ error: err.message }); }
     });
 

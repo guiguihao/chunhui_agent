@@ -231,3 +231,108 @@ describe('WebUI 端口可被重复绑定（软重启前提）', () => {
     }
   });
 });
+
+describe('WebUI 技能管理接口', () => {
+  const port = 18189;
+  let svc;
+  let base;
+  let saved;
+
+  const makeSkillSvc = () => ({
+    _all: [
+      { name: 'weather', type: 'md', description: '实时天气' },
+      { name: 'baidu-search', type: 'md', description: '网页搜索' },
+      { name: 'demo', type: 'md', description: '普通技能' },
+    ],
+    disabled: new Set(['baidu-search']),
+    async listAll() { return this._all; },
+    async list() { return this._all.filter(s => !this.disabled.has(s.name)); },
+    getDisabled() { return [...this.disabled]; },
+    setDisabled(names) { this.disabled = new Set(names); },
+    async has(name) { return this._all.some(s => s.name === name); },
+    // 与真实 SkillService 对齐：weather 属于基础能力，不可禁用
+    isProtected(name) { return String(name) === 'weather'; },
+  });
+
+  before(async () => {
+    saved = null;
+    svc = new WebUIService({ port }, {
+      _restarting: false,
+      skill: makeSkillSvc(),
+      saveSkillsDisabled: async (names) => { saved = [...names]; },
+    });
+    await svc.start();
+    base = `http://127.0.0.1:${port}`;
+  });
+
+  after(async () => { await svc?.stop(); });
+
+  const post = (body, url = base) => fetch(`${url}/api/skills`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  test('GET 列出全部技能与启用状态', async () => {
+    const data = await (await fetch(`${base}/api/skills`)).json();
+    assert.equal(data.skills.length, 3);
+    assert.equal(data.skills.find(s => s.name === 'weather').enabled, true);
+    assert.equal(data.skills.find(s => s.name === 'baidu-search').enabled, false);
+    assert.equal(data.skills.find(s => s.name === 'weather').protected, true, '需告知前端不可禁用');
+    assert.equal(data.skills.find(s => s.name === 'demo').protected, false);
+    assert.deepEqual(data.disabled, ['baidu-search']);
+  });
+
+  test('禁用技能：先落盘再改内存', async () => {
+    const res = await post({ name: 'demo', enabled: false });
+    const data = await res.json();
+
+    assert.equal(res.status, 200);
+    assert.equal(data.success, true);
+    assert.deepEqual(saved.sort(), ['baidu-search', 'demo'], '必须落盘');
+    assert.deepEqual(svc.agentInstance.skill.getDisabled().sort(), ['baidu-search', 'demo']);
+  });
+
+  test('启用技能：从禁用名单移除', async () => {
+    const res = await post({ name: 'demo', enabled: true });
+    await res.json();
+    assert.deepEqual(saved, ['baidu-search']);
+    assert.deepEqual(svc.agentInstance.skill.getDisabled(), ['baidu-search']);
+  });
+
+  test('受保护技能返回 400 且不落盘', async () => {
+    const before = saved;
+    const res = await post({ name: 'weather', enabled: false });
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, /不允许禁用/);
+    assert.deepEqual(saved, before, '受保护技能不得写入配置');
+    assert.deepEqual(svc.agentInstance.skill.getDisabled(), ['baidu-search']);
+  });
+
+  test('未知技能返回 404 且不改配置', async () => {
+    const before = saved;
+    const res = await post({ name: 'not-exist', enabled: false });
+    assert.equal(res.status, 404);
+    assert.equal(saved, before, '404 路径不得落盘');
+  });
+
+  test('落盘失败时不改内存（与工具侧同一条约定）', async () => {
+    const failing = new WebUIService({ port: port + 1 }, {
+      _restarting: false,
+      skill: makeSkillSvc(),
+      saveSkillsDisabled: async () => { throw new Error('EACCES: read-only'); },
+    });
+    await failing.start();
+    try {
+      const res = await post({ name: 'demo', enabled: false }, `http://127.0.0.1:${port + 1}`);
+      assert.equal(res.status, 500);
+      assert.deepEqual(
+        failing.agentInstance.skill.getDisabled(),
+        ['baidu-search'],
+        '写盘失败不能留下"界面显示已禁用"的状态',
+      );
+    } finally {
+      await failing.stop();
+    }
+  });
+});

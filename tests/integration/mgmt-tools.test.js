@@ -64,6 +64,7 @@ function fakeSkillService(initialDisabled = []) {
     _all: [
       { name: 'weather', type: 'md', description: '实时天气' },
       { name: 'baidu-search', type: 'md', description: '网页搜索' },
+      { name: 'demo', type: 'md', description: '普通技能' },
     ],
     disabled: new Set(initialDisabled),
     async listAll() { return this._all; },
@@ -71,6 +72,8 @@ function fakeSkillService(initialDisabled = []) {
     getDisabled() { return [...this.disabled]; },
     setDisabled(names) { this.disabled = new Set(names); },
     async has(name) { return this._all.some((s) => s.name === name); },
+    // 与真实 SkillService 对齐：weather 属于基础能力，不可禁用
+    isProtected(name) { return String(name) === 'weather'; },
   };
   return svc;
 }
@@ -236,14 +239,14 @@ describe('mgmt_mcp_* 管理', () => {
 describe('mgmt_skill_* 管理', () => {
   test('list 展示全部技能与禁用状态', async () => {
     const out = JSON.parse(await handleManagementTool(
-      { _skillService: fakeSkillService(['weather']) },
+      { _skillService: fakeSkillService(['baidu-search']) },
       'mgmt_skill_list',
       {},
     ));
 
-    assert.equal(out.skills.length, 2);
-    assert.equal(out.skills.find(s => s.name === 'weather').enabled, false);
-    assert.deepEqual(out.disabled, ['weather']);
+    assert.equal(out.skills.length, 3);
+    assert.equal(out.skills.find(s => s.name === 'baidu-search').enabled, false);
+    assert.deepEqual(out.disabled, ['baidu-search']);
   });
 
   test('toggle 禁用→启用 流转禁用名单并通知落盘', async () => {
@@ -254,12 +257,29 @@ describe('mgmt_skill_* 管理', () => {
       _onSkillsChanged: async (names) => { seen.push([...names]); },
     };
 
-    await handleManagementTool(ctx, 'mgmt_skill_toggle', { name: 'weather', enabled: false });
-    assert.deepEqual(seen.at(-1), ['weather']);
-    assert.deepEqual(svc.getDisabled(), ['weather'], '内存状态必须立即生效');
+    await handleManagementTool(ctx, 'mgmt_skill_toggle', { name: 'demo', enabled: false });
+    assert.deepEqual(seen.at(-1), ['demo']);
+    assert.deepEqual(svc.getDisabled(), ['demo'], '内存状态必须立即生效');
 
-    await handleManagementTool(ctx, 'mgmt_skill_toggle', { name: 'weather', enabled: true });
+    await handleManagementTool(ctx, 'mgmt_skill_toggle', { name: 'demo', enabled: true });
     assert.deepEqual(seen.at(-1), []);
+    assert.deepEqual(svc.getDisabled(), []);
+  });
+
+  test('受保护技能禁止禁用，且不落盘', async () => {
+    const svc = fakeSkillService();
+    const seen = [];
+    const out = await handleManagementTool(
+      {
+        _skillService: svc,
+        _onSkillsChanged: async (names) => { seen.push([...names]); },
+      },
+      'mgmt_skill_toggle',
+      { name: 'weather', enabled: false },
+    );
+
+    assert.match(out, /不允许禁用/);
+    assert.equal(seen.length, 0, '必须在落盘前就拒绝');
     assert.deepEqual(svc.getDisabled(), []);
   });
 
@@ -280,7 +300,7 @@ describe('mgmt_skill_* 管理', () => {
         _onSkillsChanged: async () => { throw new Error('EACCES: read-only'); },
       },
       'mgmt_skill_toggle',
-      { name: 'weather', enabled: false },
+      { name: 'demo', enabled: false },
     );
 
     assert.match(out, /写入 agent.yaml 失败/);

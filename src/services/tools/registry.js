@@ -314,7 +314,7 @@ export async function getAllTools(ctx, filter = null) {
           type: 'function',
           function: {
             name: 'mgmt_skill_toggle',
-            description: '启用或禁用一个技能。禁用只是不再注册其工具、不允许调用，不会删除技能文件',
+            description: '启用或禁用一个技能。禁用只是不再注册其工具、不允许调用，不会删除技能文件；tasktodolist 与 weather 属于基础能力，不可禁用',
             parameters: {
               type: 'object',
               properties: {
@@ -435,6 +435,63 @@ export async function getAllTools(ctx, filter = null) {
               regex: { type: 'boolean', description: '是否将 find 作为正则表达式' },
             },
             required: ['path'],
+          },
+        },
+      }
+    );
+
+    // .env 环境变量（增删改查）
+    // 走独立前缀而不复用 file_*：.env 在 pathguard 里是黑名单，文件工具必须继续拒绝它。
+    // 恒定注册，不依赖任何服务实例，否则模型在需要改配置时会退化成用 cmd_exec 拼 shell。
+    tools.push(
+      {
+        type: 'function',
+        function: {
+          name: 'env_list',
+          description: '列出 .env 中的全部环境变量名与掩码后的值（需要明文用 env_get）',
+          parameters: { type: 'object', properties: {}, required: [] },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'env_get',
+          description: '读取 .env 中某个环境变量的值（以文件为准）；密钥类变量严禁回显给用户或发送到外部',
+          parameters: {
+            type: 'object',
+            properties: {
+              key: { type: 'string', description: '变量名，如 OPENAI_API_KEY' },
+            },
+            required: ['key'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'env_set',
+          description: '新增或修改 .env 环境变量（就地替换，保留注释与其他行），写后自动热加载；飞书/微信等长连接凭证需重启才生效',
+          parameters: {
+            type: 'object',
+            properties: {
+              key: { type: 'string', description: '变量名（字母/数字/下划线，不能以数字开头）' },
+              value: { type: 'string', description: '变量值（不能含换行；留空表示空值）' },
+            },
+            required: ['key'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'env_delete',
+          description: '删除 .env 中的某个环境变量（删除整行），写后自动热加载；删除运行必需项会让对应功能失效',
+          parameters: {
+            type: 'object',
+            properties: {
+              key: { type: 'string', description: '变量名' },
+            },
+            required: ['key'],
           },
         },
       }

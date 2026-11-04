@@ -5,6 +5,7 @@ import ConfigView from './components/ConfigView'
 import CronView from './components/CronView'
 import HeartbeatView from './components/HeartbeatView'
 import MCPView from './components/MCPView'
+import SkillsView from './components/SkillsView'
 import ChannelsView from './components/ChannelsView'
 import { LanguageProvider } from './components/LanguageContext'
 import ErrorBoundary from './components/ErrorBoundary'
@@ -19,6 +20,7 @@ function App() {
       case 'cron':      return <CronView />
       case 'heartbeat': return <HeartbeatView />
       case 'mcp':       return <MCPView />
+      case 'skills':    return <SkillsView />
       case 'channels':  return <ChannelsView />
       default:          return <SessionView />
     }

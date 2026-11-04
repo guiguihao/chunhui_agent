@@ -1,0 +1,91 @@
+/* 技能管理视图（复用 PanelView.css 的卡片/按钮/徽章） */
+
+.skills-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.skills-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: -12px 0 18px;
+  line-height: 1.6;
+}
+
+.skills-error {
+  color: #ef4444;
+}
+
+/* 卡片头在技能列表里不可展开，去掉手型光标与 hover 底色 */
+.skills-row {
+  cursor: default;
+}
+
+.skills-row:hover {
+  background: transparent;
+}
+
+.skills-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.skills-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  min-width: 0;
+}
+
+.skills-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skills-badge-on {
+  color: #10b981;
+  border-color: rgba(16, 185, 129, 0.35);
+  background: rgba(16, 185, 129, 0.12);
+}
+
+.skills-badge-off {
+  color: var(--text-muted);
+  opacity: 0.8;
+}
+
+/* 受保护技能：开关视觉上呈"锁定"态，但仍可点击（点击给提示，不能真的静默无响应） */
+.toggle-btn.is-locked {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* 基础能力不可禁用的点击提示 */
+.skills-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 36px;
+  transform: translateX(-50%);
+  padding: 10px 18px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #f8fafc;
+  background: rgba(15, 23, 42, 0.94);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  z-index: 1000;
+  pointer-events: none;
+  animation: skills-toast-in 0.16s ease-out;
+}
+
+@keyframes skills-toast-in {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
